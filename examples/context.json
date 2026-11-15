@@ -1,0 +1,26 @@
+{
+  "productName": "Assistant",
+  "modelName": "Model",
+  "modelId": "deep-model",
+  "dataFolderName": ".assistant",
+  "ResponseLanguage": "中文",
+  "workMode": "craft",
+  "IsOversea": false,
+  "IsWindows": true,
+  "IsPersonalEdition": true,
+  "BuddyOneEnabled": true,
+  "ExpertManagementEnabled": true,
+  "CloudMemoryPlatformEnabled": false,
+  "WorkspaceMemoryDisabled": false,
+  "WecomAgentAvailable": false,
+  "WorkingMemoryContent": "",
+  "UserInstructionsContent": "",
+  "UserMemoryContent": "",
+  "ToolResultPresentationPrompt": "",
+  "WorkbuddyUserMemoryDir": "~/.assistant/user",
+  "WorkbuddyMemoryDir": ".assistant/memory",
+  "productFeatures": {
+    "DisableMultimodalGeneration": false,
+    "BrowserUse": true
+  }
+}

@@ -25,6 +25,9 @@ PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。
 welcome-mode/    三份入口模板（通用 / 代码 / 设计）
 fragments/       可复用的公共片段（策略、契约、路由、记忆等）
 plugins/         交互模式片段与技能源文件（按运行时布局）
+scripts/         公开的渲染与校验脚本
+examples/        示例渲染上下文
+package.json     nunjucks 依赖与 npm scripts
 ```
 
 模板通过 Nunjucks include 组合片段。本目录保留源布局，放置到运行时时按下面映射：
@@ -57,6 +60,14 @@ plugins/         交互模式片段与技能源文件（按运行时布局）
 ```
 
 `workMode` 取值：`craft` / `plan` / `ask` / `quick` / `expert`。不同模式会走不同的片段分支；`craft` 是默认执行模式。
+
+渲染全部组合：
+
+```bash
+npm install
+npm run render   # 3 模板 × 5 模式 → dist/
+npm run check    # 结构断言：无模板残留、关键段落与模式边界
+```
 
 ## 技能
 
