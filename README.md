@@ -82,7 +82,7 @@ scripts\deploy.cmd -Skill team-orchestration
 `deploy.ps1` 自动检测已安装的运行时（安装目录 + 插件缓存），不需要配置文件：
 
 - 管理员：同时写安装镜像与插件缓存；非管理员：只写插件缓存（运行时读取点）。
-- 找不到安装目录时，非管理员自动退化为只写缓存，不会中断；管理员仍会报错并提示 `-WorkBuddyPath`。
+- 找不到安装目录时，非管理员自动退化为只写缓存，`verify` 也只校验缓存，不会中断；管理员仍会报错并提示 `-WorkBuddyPath`。
 - 覆盖前备份到 `backups/<timestamp>/`，逐文件 SHA256 校验。
 - 校验 7 个内置技能，然后跑一致性检查；`-SkipVerify` 可跳过。
 - `-Detailed` 输出完整映射；`-Template` / `-Skill` 只替换单个文件或技能。

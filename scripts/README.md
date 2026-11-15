@@ -13,7 +13,7 @@ scripts\deploy.cmd -Skill team-orchestration
 `deploy.ps1` auto-detects the installed runtime (install directory + plugin cache), delegates to `apply.ps1`, asserts 7 built-in skills, then runs `verify.ps1`.
 
 - Admin: writes the install mirror and the plugin cache; non-admin: cache only (the runtime read point).
-- If the install folder is not found, non-admin runs automatically fall back to cache-only; admin runs still ask for `-WorkBuddyPath`.
+- If the install folder is not found, non-admin runs automatically fall back to cache-only; `verify` also switches to cache-only. Admin runs still ask for `-WorkBuddyPath`.
 - Existing files are backed up to `backups/<timestamp>/`; every copy is verified with SHA256.
 - `-Detailed` prints the full mapping; `-SkipVerify` skips the consistency check; `-Template` / `-Skill` target one file or one skill.
 

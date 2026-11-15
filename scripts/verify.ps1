@@ -15,15 +15,98 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Test-WorkBuddyRoot([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $p = $path.Trim().Trim('"').Trim()
+    if ([string]::IsNullOrWhiteSpace($p)) { return $false }
+    $resource = Join-Path $p "resources\app.asar.unpacked\resources"
+    $asar = Join-Path $p "resources\app.asar"
+    $exe = Join-Path $p "WorkBuddy.exe"
+    if (Test-Path -LiteralPath $resource) { return $true }
+    if (Test-Path -LiteralPath $asar) { return $true }
+    if (Test-Path -LiteralPath $exe) { return $true }
+    return $false
+}
+
 function Resolve-WorkBuddyPath([string]$explicitPath) {
-    if ($explicitPath) { return $explicitPath }
-    $candidates = @(
-        "C:\Program Files\WorkBuddy",
-        "C:\Program Files (x86)\WorkBuddy",
-        (Join-Path $env:LOCALAPPDATA "Programs\WorkBuddy")
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($explicitPath) { $candidates.Add($explicitPath) }
+
+    $common = @()
+    if ($env:ProgramFiles) { $common += (Join-Path $env:ProgramFiles "WorkBuddy") }
+    if (${env:ProgramFiles(x86)}) { $common += (Join-Path ${env:ProgramFiles(x86)} "WorkBuddy") }
+    if ($env:LOCALAPPDATA) {
+        $common += (Join-Path $env:LOCALAPPDATA "Programs\WorkBuddy")
+        $common += (Join-Path $env:LOCALAPPDATA "WorkBuddy")
+    }
+    if ($env:APPDATA) { $common += (Join-Path $env:APPDATA "WorkBuddy") }
+    foreach ($p in $common) { if ($p) { $candidates.Add($p) } }
+
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $root) { continue }
+        try {
+            Get-ChildItem -LiteralPath $root -Directory -Filter "WorkBuddy*" -ErrorAction SilentlyContinue |
+                ForEach-Object { $candidates.Add($_.FullName) }
+        } catch { }
+    }
+
+    try {
+        $proc = Get-Process -Name "WorkBuddy" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($proc -and $proc.Path) { $candidates.Add((Split-Path $proc.Path -Parent)) }
+    } catch { }
+
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WorkBuddy.exe",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WorkBuddy.exe"
+    )) {
+        try {
+            $item = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+            if ($item) {
+                $exe = $item.'(default)'
+                if (-not $exe) { $exe = $item.Path }
+                if ($exe) { $candidates.Add((Split-Path ($exe.Trim('"')) -Parent)) }
+            }
+        } catch { }
+    }
+
+    $registryRoots = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
     )
-    foreach ($c in $candidates) {
-        if (Test-Path -LiteralPath (Join-Path $c "WorkBuddy.exe")) { return $c }
+    foreach ($root in $registryRoots) {
+        try {
+            Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -like "*WorkBuddy*" } |
+                ForEach-Object {
+                    if ($_.InstallLocation) { $candidates.Add($_.InstallLocation.Trim('"')) }
+                    if ($_.DisplayIcon) {
+                        $icon = ($_.DisplayIcon -replace ',\d+$', '').Trim('"')
+                        if ($icon -like '*.exe') { $candidates.Add((Split-Path $icon -Parent)) }
+                    }
+                    if ($_.UninstallString) {
+                        $u = $_.UninstallString.Trim()
+                        if ($u.StartsWith('"')) {
+                            $end = $u.IndexOf('"', 1)
+                            if ($end -gt 0) { $u = $u.Substring(1, $end - 1) }
+                        } else {
+                            $u = ($u -split ' ')[0]
+                        }
+                        if ($u -like '*.exe') { $candidates.Add((Split-Path $u -Parent)) }
+                    }
+                }
+        } catch { }
+    }
+
+    try {
+        $cmd = Get-Command "WorkBuddy.exe" -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) { $candidates.Add((Split-Path $cmd.Source -Parent)) }
+    } catch { }
+
+    foreach ($candidate in $candidates) {
+        if (Test-WorkBuddyRoot $candidate) {
+            return [IO.Path]::GetFullPath($candidate.Trim('"'))
+        }
     }
     throw "WorkBuddy not found; pass -WorkBuddyPath."
 }
@@ -36,6 +119,7 @@ function Resolve-CacheRoot([string]$explicitPath) {
 }
 
 function Get-Sha256([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return "" }
     if (-not (Test-Path -LiteralPath $path)) { return "" }
     try {
         $sha = [Security.Cryptography.SHA256]::Create()
@@ -46,6 +130,7 @@ function Get-Sha256([string]$path) {
 }
 
 function Get-SizeOf([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return -1 }
     if (Test-Path -LiteralPath $path) { return (Get-Item -LiteralPath $path).Length }
     return -1
 }
@@ -120,8 +205,13 @@ function Find-NewestTraceWithPrompt([string]$root, [int]$minutes, [int]$maxCandi
     return $null
 }
 
-$wb = Resolve-WorkBuddyPath $WorkBuddyPath
-$res = Join-Path $wb "resources\app.asar.unpacked\resources"
+$wb = $null
+try {
+    $wb = Resolve-WorkBuddyPath $WorkBuddyPath
+} catch {
+    Write-Output "WorkBuddy install folder not found; verifying cache only."
+}
+$res = if ($wb) { Join-Path $wb "resources\app.asar.unpacked\resources" } else { "" }
 $cache = Resolve-CacheRoot $PluginCacheRoot
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $traceRoot = Join-Path (Join-Path $env:USERPROFILE ".workbuddy") "traces"
@@ -201,12 +291,12 @@ Write-Output ""
 Write-Output "== File consistency (project -> install mirror -> cache [LIVE]) =="
 foreach ($mode in @("work", "code", "design")) {
     $p = Join-Path $project ("welcome-mode\{0}.tpl" -f $mode)
-    $inst = Join-Path $res ("plugins\workbuddy-builtin\welcomemode\{0}\prompt.tpl" -f $mode)
+    $inst = if ($res) { Join-Path $res ("plugins\workbuddy-builtin\welcomemode\{0}\prompt.tpl" -f $mode) } else { "" }
     $pHash = Get-Sha256 $p
     $iHash = Get-Sha256 $inst
     $pSize = Get-SizeOf $p
     $iSize = Get-SizeOf $inst
-    $state = if ($pHash -and $pHash -eq $iHash) { "MATCH" } elseif ($iHash) { "MISMATCH (run apply)" } else { "install missing" }
+    $state = if (-not $res) { "install n/a (cache-only)" } elseif ($pHash -and $pHash -eq $iHash) { "MATCH" } elseif ($iHash) { "MISMATCH (run apply)" } else { "install missing" }
     Write-Output ("  welcomemode-{0,-7} project={1,6}  install={2,6}  {3}" -f $mode, $pSize, $iSize, $state)
     $cDir = Join-Path $cache ("welcomemode-{0}" -f $mode)
     if (Test-Path -LiteralPath $cDir) {
@@ -218,8 +308,8 @@ foreach ($mode in @("work", "code", "design")) {
     }
 }
 $tp = Join-Path $project "archive\20261114-unused\templates\workbuddy-prompt.tpl"
-$ti = Join-Path $res "templates\workbuddy-prompt.tpl"
-$templateState = if ((Get-Sha256 $tp) -and ((Get-Sha256 $tp) -eq (Get-Sha256 $ti))) { "MATCH" } else { "MISMATCH" }
+$ti = if ($res) { Join-Path $res "templates\workbuddy-prompt.tpl" } else { "" }
+$templateState = if (-not $res) { "install n/a" } elseif ((Get-Sha256 $tp) -and ((Get-Sha256 $tp) -eq (Get-Sha256 $ti))) { "MATCH" } else { "MISMATCH" }
 Write-Output ("  templates\workbuddy-prompt.tpl  (DECOY, not sent)  archive={0,6}  install={1,6}" -f (Get-SizeOf $tp), (Get-SizeOf $ti))
 
 Write-Output ""
@@ -232,7 +322,7 @@ if (Test-Path -LiteralPath $skillSrc) {
         if (-not (Test-Path -LiteralPath $skillFile)) { continue }
         $srcHash = Get-Sha256 $skillFile
         $srcSize = Get-SizeOf $skillFile
-        $instHash = Get-Sha256 (Join-Path $res ("plugins\workbuddy-builtin\skills\{0}\SKILL.md" -f $name))
+        $instHash = if ($res) { Get-Sha256 (Join-Path $res ("plugins\workbuddy-builtin\skills\{0}\SKILL.md" -f $name)) } else { "" }
         $cachePlugin = Join-Path $cache ("skill-{0}" -f $name)
         if (-not (Test-Path -LiteralPath $cachePlugin)) {
             Write-Output ("  {0,-34} project={1,6}  cache=MISSING  not a cached skill" -f $name, $srcSize)
@@ -241,7 +331,7 @@ if (Test-Path -LiteralPath $skillSrc) {
         foreach ($v in @(Get-ChildItem -LiteralPath $cachePlugin -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
             $cHash = Get-Sha256 (Join-Path $v.FullName "SKILL.md")
             $state = if ($srcHash -and $srcHash -eq $cHash) { "MATCH" } else { "MISMATCH (run apply)" }
-            $instState = if ($srcHash -and $srcHash -eq $instHash) { "install MATCH" } elseif ($instHash) { "install MISMATCH" } else { "install missing" }
+            $instState = if (-not $res) { "install n/a" } elseif ($srcHash -and $srcHash -eq $instHash) { "install MATCH" } elseif ($instHash) { "install MISMATCH" } else { "install missing" }
             Write-Output ("  {0,-34} project={1,6}  cache={2,6}  {3}, {4}" -f $name, $srcSize, (Get-SizeOf (Join-Path $v.FullName "SKILL.md")), $state, $instState)
         }
     }
@@ -251,7 +341,7 @@ Write-Output ""
 Write-Output "== Source classification =="
 $probeWelcome = Get-MarkerCount $head '[PROBE-B-WELCOME]'
 $probeTemplate = (Get-MarkerCount $head '[WBv2]') + (Get-MarkerCount $head '[PROBE-A]')
-$instWelcome = Join-Path $res "plugins\workbuddy-builtin\welcomemode\work\prompt.tpl"
+$instWelcome = if ($res) { Join-Path $res "plugins\workbuddy-builtin\welcomemode\work\prompt.tpl" } else { "" }
 $cacheWelcome = ""
 $cDir = Join-Path $cache "welcomemode-work"
 if (Test-Path -LiteralPath $cDir) {
@@ -259,7 +349,7 @@ if (Test-Path -LiteralPath $cDir) {
     if ($latest.Count -gt 0) { $cacheWelcome = Join-Path $latest[0].FullName "prompt.tpl" }
 }
 $instHasProbe = 0
-if (Test-Path -LiteralPath $instWelcome) { $instHasProbe = Get-MarkerCount ([IO.File]::ReadAllText($instWelcome)) '[PROBE-B-WELCOME]' }
+if ($instWelcome -and (Test-Path -LiteralPath $instWelcome)) { $instHasProbe = Get-MarkerCount ([IO.File]::ReadAllText($instWelcome)) '[PROBE-B-WELCOME]' }
 $cacheHasProbe = 0
 if ($cacheWelcome -and (Test-Path -LiteralPath $cacheWelcome)) { $cacheHasProbe = Get-MarkerCount ([IO.File]::ReadAllText($cacheWelcome)) '[PROBE-B-WELCOME]' }
 if ($probeTemplate -gt 0) {
