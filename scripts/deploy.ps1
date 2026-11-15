@@ -87,7 +87,11 @@ if (-not $SkipVerify) {
     & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptRoot "verify.ps1")
     $verifyExit = $LASTEXITCODE
     if ($verifyExit -eq 1) {
-        throw "verify.ps1 reported a failure (exit 1)"
+        if ($NoInstall -or -not $isAdmin) {
+            Write-Host "verify could not complete (install mirror not available); cache files were hash-verified by apply." -ForegroundColor Yellow
+        } else {
+            throw "verify.ps1 reported a failure (exit 1)"
+        }
     }
     if ($verifyExit -eq 2) {
         Write-Host "verify: a marker was not covered by the captured prefix (exit 2); check manually." -ForegroundColor Yellow

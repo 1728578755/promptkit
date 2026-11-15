@@ -85,13 +85,64 @@ function Test-Admin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-WorkBuddyRoot([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $p = $path.Trim().Trim('"').Trim()
+    if ([string]::IsNullOrWhiteSpace($p)) { return $false }
+    $resource = Join-Path $p "resources\app.asar.unpacked\resources"
+    $asar = Join-Path $p "resources\app.asar"
+    $exe = Join-Path $p "WorkBuddy.exe"
+    if (Test-Path -LiteralPath $resource) { return $true }
+    if (Test-Path -LiteralPath $asar) { return $true }
+    if (Test-Path -LiteralPath $exe) { return $true }
+    return $false
+}
+
 function Resolve-WorkBuddyPath([string]$explicitPath) {
     $candidates = New-Object System.Collections.Generic.List[string]
     if ($explicitPath) { $candidates.Add($explicitPath) }
-    if ($env:ProgramFiles) { $candidates.Add((Join-Path $env:ProgramFiles "WorkBuddy")) }
-    if (${env:ProgramFiles(x86)}) { $candidates.Add((Join-Path ${env:ProgramFiles(x86)} "WorkBuddy")) }
-    if ($env:LOCALAPPDATA) { $candidates.Add((Join-Path $env:LOCALAPPDATA "Programs\WorkBuddy")) }
 
+    $common = @()
+    if ($env:ProgramFiles) { $common += (Join-Path $env:ProgramFiles "WorkBuddy") }
+    if (${env:ProgramFiles(x86)}) { $common += (Join-Path ${env:ProgramFiles(x86)} "WorkBuddy") }
+    if ($env:LOCALAPPDATA) {
+        $common += (Join-Path $env:LOCALAPPDATA "Programs\WorkBuddy")
+        $common += (Join-Path $env:LOCALAPPDATA "WorkBuddy")
+    }
+    if ($env:APPDATA) { $common += (Join-Path $env:APPDATA "WorkBuddy") }
+    foreach ($p in $common) { if ($p) { $candidates.Add($p) } }
+
+    # Sibling folders next to the standard install root (WorkBuddy, WorkBuddy Beta, ...)
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $root) { continue }
+        try {
+            Get-ChildItem -LiteralPath $root -Directory -Filter "WorkBuddy*" -ErrorAction SilentlyContinue |
+                ForEach-Object { $candidates.Add($_.FullName) }
+        } catch { }
+    }
+
+    # Running process
+    try {
+        $proc = Get-Process -Name "WorkBuddy" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($proc -and $proc.Path) { $candidates.Add((Split-Path $proc.Path -Parent)) }
+    } catch { }
+
+    # App Paths
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WorkBuddy.exe",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WorkBuddy.exe"
+    )) {
+        try {
+            $item = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+            if ($item) {
+                $exe = $item.'(default)'
+                if (-not $exe) { $exe = $item.Path }
+                if ($exe) { $candidates.Add((Split-Path ($exe.Trim('"')) -Parent)) }
+            }
+        } catch { }
+    }
+
+    # Uninstall entries: InstallLocation / DisplayIcon / UninstallString
     $registryRoots = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -100,19 +151,39 @@ function Resolve-WorkBuddyPath([string]$explicitPath) {
     foreach ($root in $registryRoots) {
         try {
             Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
-                Where-Object { $_.DisplayName -like "*WorkBuddy*" -and $_.InstallLocation } |
-                ForEach-Object { $candidates.Add($_.InstallLocation) }
+                Where-Object { $_.DisplayName -like "*WorkBuddy*" } |
+                ForEach-Object {
+                    if ($_.InstallLocation) { $candidates.Add($_.InstallLocation.Trim('"')) }
+                    if ($_.DisplayIcon) {
+                        $icon = ($_.DisplayIcon -replace ',\d+$', '').Trim('"')
+                        if ($icon -like '*.exe') { $candidates.Add((Split-Path $icon -Parent)) }
+                    }
+                    if ($_.UninstallString) {
+                        $u = $_.UninstallString.Trim()
+                        if ($u.StartsWith('"')) {
+                            $end = $u.IndexOf('"', 1)
+                            if ($end -gt 0) { $u = $u.Substring(1, $end - 1) }
+                        } else {
+                            $u = ($u -split ' ')[0]
+                        }
+                        if ($u -like '*.exe') { $candidates.Add((Split-Path $u -Parent)) }
+                    }
+                }
         } catch { }
     }
 
+    # PATH / shims
+    try {
+        $cmd = Get-Command "WorkBuddy.exe" -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) { $candidates.Add((Split-Path $cmd.Source -Parent)) }
+    } catch { }
+
     foreach ($candidate in $candidates) {
-        if (-not $candidate) { continue }
-        $template = Join-Path $candidate "resources\app.asar.unpacked\resources\templates\workbuddy-prompt.tpl"
-        if (Test-Path -LiteralPath $template) {
-            return [IO.Path]::GetFullPath($candidate)
+        if (Test-WorkBuddyRoot $candidate) {
+            return [IO.Path]::GetFullPath($candidate.Trim('"'))
         }
     }
-    throw "WorkBuddy installation not found. Pass -WorkBuddyPath 'C:\Program Files\WorkBuddy'."
+    throw "WorkBuddy installation not found. Pass -WorkBuddyPath '<install folder>'."
 }
 
 function Get-ResourceRoot([string]$wb) {
@@ -505,14 +576,32 @@ if (-not $All -and -not $Template) {
     $All = $true
 }
 
-$wb = Resolve-WorkBuddyPath $WorkBuddyPath
-$resourceRoot = Get-ResourceRoot $wb
 $cacheRoot = Get-PluginCacheRoot $PluginCacheRoot
-$versionFile = Join-Path $wb "version"
-$version = if (Test-Path -LiteralPath $versionFile) {
-    (Get-Content -LiteralPath $versionFile -Raw).Trim()
+$wb = $null
+try {
+    $wb = Resolve-WorkBuddyPath $WorkBuddyPath
+} catch {
+    if (-not $NoInstall) { throw }
+    Write-Host "WorkBuddy install folder not found; continuing with cache-only (-NoInstall)." -ForegroundColor Yellow
+}
+
+if ($wb) {
+    $resourceRoot = Get-ResourceRoot $wb
+    $versionFile = Join-Path $wb "version"
+    $version = if (Test-Path -LiteralPath $versionFile) {
+        (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    } else {
+        "unknown"
+    }
 } else {
-    "unknown"
+    if (-not (Test-Path -LiteralPath $cacheRoot)) {
+        throw "WorkBuddy plugin cache not found: $cacheRoot. Pass -PluginCacheRoot or start WorkBuddy once."
+    }
+    $version = Get-BuiltinBundleVersion $cacheRoot
+    if (-not $version) {
+        throw "WorkBuddy plugin cache has no version directory: $cacheRoot. Start WorkBuddy once, then retry."
+    }
+    $resourceRoot = Join-Path $cacheRoot "__install__"
 }
 
 if ($All) {
@@ -590,7 +679,8 @@ foreach ($mapping in $mappings) {
     }
 }
 
-Write-Host "WorkBuddy:   $wb"
+$wbLabel = if ($wb) { $wb } else { "(not detected; cache-only)" }
+Write-Host "WorkBuddy:   $wbLabel"
 Write-Host "Version:     $version"
 Write-Host "Resources:   $resourceRoot"
 Write-Host "PluginCache: $cacheRoot"
@@ -632,7 +722,7 @@ if ($PSBoundParameters.ContainsKey('Verbose')) {
     Write-Host "(run with -Verbose for per-file mapping)"
     Write-Host ""
 }
-if ($skipped.Count -gt 0) {
+if ($skipped.Count -gt 0 -and $wb) {
     Write-Host ""
     Write-Host "Install copy missing (cache-only targets): $($skipped -join ', ')"
 }
