@@ -5,16 +5,22 @@
 ```bat
 scripts\deploy.cmd
 scripts\deploy.cmd -DryRun
-scripts\deploy.cmd -TargetRoot D:\my-runtime
+scripts\deploy.cmd -NoInstall
+scripts\deploy.cmd -Template welcome-mode\work.tpl
+scripts\deploy.cmd -Skill team-orchestration
 ```
 
-`deploy.ps1` reads `deploy.config.json` from the repository root:
+`deploy.ps1` auto-detects the installed runtime (install directory + plugin cache), delegates to `apply.ps1`, asserts 7 built-in skills, then runs `verify.ps1`.
 
-- `targetRoot` — destination root; `%VAR%` is expanded. Defaults to `%USERPROFILE%/.promptkit/runtime`.
-- `layout` — path templates: `{file}`, `{mode}`, `{name}`, `{path}`.
-- `backup` — back up existing destination files to `backups/<timestamp>/` before overwrite (default `true`).
+- Admin: writes the install mirror and the plugin cache; non-admin: cache only (the runtime read point).
+- Existing files are backed up to `backups/<timestamp>/`; every copy is verified with SHA256.
+- `-Detailed` prints the full mapping; `-SkipVerify` skips the consistency check; `-Template` / `-Skill` target one file or one skill.
 
-Every copied file is verified with SHA256. `-DryRun` prints the plan without writing; `-TargetRoot` overrides the config; `-NoBackup` skips the backup step. No admin is required for user-writable targets.
+## Rollback
+
+```powershell
+scripts\restore.ps1 -BackupPath backups\<timestamp>
+```
 
 ## Render / check
 
@@ -24,8 +30,11 @@ npm run render   # renders 3 templates × 5 modes into dist/
 npm run check    # checks for template leftovers and required blocks
 ```
 
-## What they do
+## Files
 
-- `deploy.ps1` — builds the source-to-target plan, backs up existing files, copies, and verifies hashes.
-- `render.js` — builds a Nunjucks loader that maps `prompt-common/fragments/*` to `fragments/*` and `interactionmode-*/fragments/*` to the matching plugin directory, then renders all 15 combinations using `examples/context.json`.
-- `check.js` — verifies every render has no `{{` / `{%` leftovers, contains the expected policy/contract/routing blocks, and respects the Ask/Quick mode boundaries.
+- `deploy.ps1` / `deploy.cmd` — one-click entry, auto-detects the runtime.
+- `apply.ps1` — copy engine: source tree → install mirror + plugin cache, backups, skill registration.
+- `verify.ps1` — consistency check across project / install / cache.
+- `restore.ps1` — restore a previous backup.
+- `render.js` — Nunjucks render of all 15 template/mode combinations.
+- `check.js` — structural assertions on the renders.
