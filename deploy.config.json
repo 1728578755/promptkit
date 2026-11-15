@@ -1,0 +1,10 @@
+{
+  "targetRoot": "%USERPROFILE%/.promptkit/runtime",
+  "layout": {
+    "welcomeMode": "welcome-mode/{file}",
+    "fragments": "prompt-common/fragments/{file}",
+    "interactionMode": "interactionmode-{mode}/fragments/{file}",
+    "skills": "skills/{name}/{path}"
+  },
+  "backup": true
+}
