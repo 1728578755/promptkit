@@ -1,11 +1,12 @@
 {
   "name": "promptkit",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "A cache-friendly system prompt framework for desktop AI assistants.",
   "scripts": {
     "render": "node scripts/render.js",
-    "check": "node scripts/check.js"
+    "check": "node scripts/check.js",
+    "render-check": "node scripts/render-check.js"
   },
   "devDependencies": {
     "nunjucks": "^3.2.4"
