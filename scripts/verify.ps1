@@ -2,6 +2,8 @@
 param(
     [string]$WorkBuddyPath = "",
     [string]$PluginCacheRoot = "",
+    [string]$Target = "",
+    [string]$ConfigDir = "",
     [string]$TraceFile = "",
     [int]$LookbackMinutes = 1440,
     [int]$MaxCandidates = 20,
@@ -9,11 +11,18 @@ param(
     [string]$Absent = "content_policy",
     [switch]$ListTraces,
     [switch]$ShowSystemPrompt,
+    [switch]$CheckIncludes,
     [int]$HeadChars = 800,
     [string]$UserSkillsRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "target.ps1")
+$targetProfile = Resolve-TargetProfile -Name $Target -ScriptRoot $PSScriptRoot -ConfigDirOverride $ConfigDir -InstallOverride $WorkBuddyPath -CacheRootOverride $PluginCacheRoot
+if (-not $WorkBuddyPath) { $WorkBuddyPath = $targetProfile.InstallPath }
+if (-not $ConfigDir) { $ConfigDir = $targetProfile.ConfigDir }
+if (-not $PluginCacheRoot -and $targetProfile.CacheRoot) { $PluginCacheRoot = $targetProfile.CacheRoot }
 
 function Test-WorkBuddyRoot([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return $false }
@@ -113,6 +122,7 @@ function Resolve-WorkBuddyPath([string]$explicitPath) {
 
 function Resolve-CacheRoot([string]$explicitPath) {
     if ($explicitPath) { return $explicitPath }
+    if ($ConfigDir) { return (Join-Path $ConfigDir "plugins\cache\workbuddy-builtin") }
     $configDir = $env:WORKBUDDY_CONFIG_DIR
     if (-not $configDir) { $configDir = Join-Path $env:USERPROFILE ".workbuddy" }
     return (Join-Path $configDir "plugins\cache\workbuddy-builtin")
@@ -133,6 +143,63 @@ function Get-SizeOf([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return -1 }
     if (Test-Path -LiteralPath $path) { return (Get-Item -LiteralPath $path).Length }
     return -1
+}
+
+# Resolve every {% include "plugin/sub/path" %} found in the plugin cache.
+# The app loads the newest version directory of each plugin, so only that one is
+# checked; an include resolves against the same version, else the target plugin's
+# newest version (cross-plugin version drift is normal after an app update).
+function Get-VersionDirKey([string]$name) {
+    $m = [regex]::Match($name, '^\d+(\.\d+){0,3}')
+    if ($m.Success) {
+        try { return [version]$m.Value } catch { }
+    }
+    return [version]"0.0.0.0"
+}
+
+function Test-IncludeResolution([string]$cacheRoot) {
+    $missing = @()
+    $checked = 0
+    $latest = @{}
+    $staleSkipped = 0
+    if (-not (Test-Path -LiteralPath $cacheRoot)) {
+        return [pscustomobject]@{ Checked = 0; Missing = @("cache root not found: $cacheRoot"); StaleSkipped = 0 }
+    }
+    foreach ($pluginDir in @(Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue)) {
+        $vers = @(Get-ChildItem -LiteralPath $pluginDir.FullName -Directory -ErrorAction SilentlyContinue |
+            Sort-Object -Property @{ Expression = { Get-VersionDirKey $_.Name } } -Descending)
+        if ($vers.Count -eq 0) { continue }
+        $latest[$pluginDir.Name] = $vers[0].Name
+        $staleSkipped += ($vers.Count - 1)
+    }
+    foreach ($pluginName in $latest.Keys) {
+        $verName = $latest[$pluginName]
+        $verDir = Join-Path (Join-Path $cacheRoot $pluginName) $verName
+        $files = @(Get-ChildItem -LiteralPath $verDir -File -Recurse -Include *.tpl, *.md -ErrorAction SilentlyContinue)
+        foreach ($file in $files) {
+            $text = [IO.File]::ReadAllText($file.FullName)
+            foreach ($m in [regex]::Matches($text, '\{%-?\s*include\s+"([^"]+)"')) {
+                $checked++
+                $inc = $m.Groups[1].Value -replace '/', '\'
+                $parts = $inc.Split('\')
+                if ($parts.Length -lt 2) { $missing += ("{0} -> {1} (bad form)" -f $file.Name, $inc); continue }
+                $tPlugin = $parts[0]
+                $tSub = ($parts[1..($parts.Length - 1)]) -join '\'
+                $candidates = @(
+                    (Join-Path (Join-Path (Join-Path $cacheRoot $tPlugin) $verName) $tSub)
+                )
+                if ($latest.ContainsKey($tPlugin) -and $latest[$tPlugin] -ne $verName) {
+                    $candidates += (Join-Path (Join-Path (Join-Path $cacheRoot $tPlugin) $latest[$tPlugin]) $tSub)
+                }
+                $found = $false
+                foreach ($c in $candidates) { if (Test-Path -LiteralPath $c) { $found = $true; break } }
+                if (-not $found) {
+                    $missing += ("{0}\{1}\{2} -> {3}" -f $pluginName, $verName, $file.Name, $inc)
+                }
+            }
+        }
+    }
+    return [pscustomobject]@{ Checked = $checked; Missing = $missing; StaleSkipped = $staleSkipped }
 }
 
 function Get-TraceCandidates([string]$root, [int]$minutes) {
@@ -214,7 +281,22 @@ try {
 $res = if ($wb) { Join-Path $wb "resources\app.asar.unpacked\resources" } else { "" }
 $cache = Resolve-CacheRoot $PluginCacheRoot
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-$traceRoot = Join-Path (Join-Path $env:USERPROFILE ".workbuddy") "traces"
+$traceRoot = Join-Path $ConfigDir "traces"
+
+Write-Output ("== Target: {0} ({1}) ==" -f $targetProfile.Name, $targetProfile.Label)
+Write-Output ("  install:   {0}{1}" -f $WorkBuddyPath, $(if ($wb) { "" } else { "  (not found)" }))
+Write-Output ("  config:    {0}" -f $ConfigDir)
+Write-Output ("  cache:     {0}" -f $cache)
+
+$includeFailed = $false
+if ($CheckIncludes) {
+    $r = Test-IncludeResolution $cache
+    Write-Output ""
+    Write-Output "== Include resolution (plugin cache) =="
+    Write-Output ("  includes checked: {0}, missing: {1} (stale version dirs skipped: {2})" -f $r.Checked, $r.Missing.Count, $r.StaleSkipped)
+    foreach ($m in @($r.Missing | Select-Object -First 20)) { Write-Output ("  MISSING {0}" -f $m) }
+    if ($r.Missing.Count -gt 0) { $includeFailed = $true }
+}
 
 if ($TraceFile) {
     if (-not (Test-Path -LiteralPath $TraceFile)) { throw "Trace file not found: $TraceFile" }
@@ -259,6 +341,40 @@ Write-Output ("  started:  {0}" -f $info.StartedAt)
 Write-Output ("  session:  {0}" -f $info.SessionId)
 Write-Output ("  agent:    {0}" -f $info.AgentName)
 Write-Output ("  captured: {0} chars (trace truncates toolInput at about 20k)" -f $head.Length)
+$staleTrace = $false
+$cachePromptForAge = ""
+$ageDir = Join-Path $cache "welcomemode-work"
+if (Test-Path -LiteralPath $ageDir) {
+    $newest = @(Get-ChildItem -LiteralPath $ageDir -Directory -ErrorAction SilentlyContinue |
+        Sort-Object -Property @{ Expression = { Get-VersionDirKey $_.Name } } -Descending | Select-Object -First 1)
+    if ($newest.Count -gt 0) { $cachePromptForAge = Join-Path $newest[0].FullName "prompt.tpl" }
+}
+if ($cachePromptForAge -and (Test-Path -LiteralPath $cachePromptForAge) -and (Test-Path -LiteralPath $info.Path)) {
+    # apply copies files with File.Copy, which keeps the source mtime; the real deploy
+    # time lives in the newest matching backup manifest.
+    $deployTime = $null
+    $backupRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "backups"
+    if (Test-Path -LiteralPath $backupRoot) {
+        foreach ($dir in @(Get-ChildItem -LiteralPath $backupRoot -Directory -ErrorAction SilentlyContinue)) {
+            $manifestFile = Join-Path $dir.FullName "manifest.json"
+            if (-not (Test-Path -LiteralPath $manifestFile)) { continue }
+            try {
+                $m = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
+                if ($m.target -and $m.target -ne $targetProfile.Name) { continue }
+                if (-not $m.target) { continue }
+                $created = [datetime]::Parse($m.createdAt, [Globalization.CultureInfo]::InvariantCulture)
+                if (-not $deployTime -or $created -gt $deployTime) { $deployTime = $created }
+            } catch { }
+        }
+    }
+    if (-not $deployTime) { $deployTime = (Get-Item -LiteralPath $cachePromptForAge).LastWriteTime }
+    $traceTime = (Get-Item -LiteralPath $info.Path).LastWriteTime
+    $staleTrace = ($traceTime -lt $deployTime)
+    Write-Output ("  deployed:  {0} (last apply for this target)" -f $deployTime.ToString("yyyy-MM-dd HH:mm:ss"))
+    if ($staleTrace) {
+        Write-Output "  STALE:     this request predates the deployed prompt; open a new chat in this app and rerun."
+    }
+}
 Write-Output ""
 Write-Output "  marker counts in the captured prefix:"
 foreach ($marker in @(
@@ -310,7 +426,9 @@ foreach ($mode in @("work", "code", "design")) {
 $tp = Join-Path $project "archive\20261114-unused\templates\workbuddy-prompt.tpl"
 $ti = if ($res) { Join-Path $res "templates\workbuddy-prompt.tpl" } else { "" }
 $templateState = if (-not $res) { "install n/a" } elseif ((Get-Sha256 $tp) -and ((Get-Sha256 $tp) -eq (Get-Sha256 $ti))) { "MATCH" } else { "MISMATCH" }
-Write-Output ("  templates\workbuddy-prompt.tpl  (DECOY, not sent)  archive={0,6}  install={1,6}" -f (Get-SizeOf $tp), (Get-SizeOf $ti))
+if (Test-Path -LiteralPath $tp) {
+    Write-Output ("  templates\workbuddy-prompt.tpl  (DECOY, not sent)  archive={0,6}  install={1,6}" -f (Get-SizeOf $tp), (Get-SizeOf $ti))
+}
 
 Write-Output ""
 Write-Output "== Builtin skills (project -> install -> cache) =="
@@ -370,7 +488,7 @@ if ($probeTemplate -gt 0) {
 
 Write-Output ""
 Write-Output "== Legacy metric (do NOT use this to judge effectiveness) =="
-$logDir = Join-Path (Join-Path $env:USERPROFILE ".workbuddy\logs") (Get-Date -Format "yyyy-MM-dd")
+$logDir = Join-Path (Join-Path $ConfigDir "logs") (Get-Date -Format "yyyy-MM-dd")
 if (Test-Path -LiteralPath $logDir) {
     $renders = @(Get-ChildItem -LiteralPath $logDir -Filter *.log -File -ErrorAction SilentlyContinue |
         Select-String -Pattern '\[PromptRenderer\] Rendered \((\d+) chars, mode=([a-z-]*), kind=([a-z-]*), welcomeMode=([a-z]*)' -AllMatches |
@@ -400,7 +518,12 @@ if ($Expect) {
 }
 if ($Absent) {
     $n = Get-MarkerCount $head $Absent
-    if ($n -gt 0) {
+    if ($n -gt 0 -and $staleTrace) {
+        Write-Output ""
+        Write-Output ("STALE_TRACE: {0} still appears {1} time(s), but this request predates the deployed prompt." -f $Absent, $n)
+        Write-Output "  Not a failure: open a new chat in this app, send one message, rerun this script."
+        $inconclusive = $true
+    } elseif ($n -gt 0) {
         Write-Output ("FAIL: forbidden marker present: {0} ({1} occurrence(s))" -f $Absent, $n)
         $failed = $true
     } else {
@@ -409,7 +532,7 @@ if ($Absent) {
     }
 }
 
-if ($failed) { exit 1 }
+if ($failed -or $includeFailed) { exit 1 }
 if ($inconclusive) { exit 2 }
 
 exit 0

@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "default": "",
+  "_comment": "Nothing here is required: installations are auto-discovered (uninstall registry, App Paths, running processes, <drive>:\\Program Files*\\WorkBuddy*, %USERPROFILE%\\.workbuddy*). Set default or a target's installPath/configDir only to pin a specific installation.",
+  "targets": {
+    "workbuddy": {
+      "label": "WorkBuddy (CN edition)",
+      "installPath": "",
+      "configDir": ""
+    },
+    "workbuddy-ai": {
+      "label": "WorkBuddy AI (international edition)",
+      "installPath": "",
+      "configDir": ""
+    }
+  }
+}

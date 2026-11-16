@@ -1,6 +1,9 @@
 ﻿[CmdletBinding()]
 param(
     [string]$WorkBuddyPath = "",
+    [string]$Target = "",
+    [string]$ConfigDir = "",
+    [string]$Overlay = "",
     [string]$Template = "",
     [string]$Source = "",
     [switch]$All,
@@ -22,7 +25,18 @@ $ScriptRoot = $PSScriptRoot
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $ScriptRoot "..")).Path
 $CustomRoot = Join-Path $ProjectRoot "custom"
 $BackupRoot = Join-Path $ProjectRoot "backups"
-$SourceRoots = @($ProjectRoot)
+
+. (Join-Path $ScriptRoot "target.ps1")
+$targetProfile = Resolve-TargetProfile -Name $Target -ScriptRoot $ScriptRoot `
+    -ConfigDirOverride $ConfigDir -InstallOverride $WorkBuddyPath -CacheRootOverride $PluginCacheRoot -OverlayOverride $Overlay
+if (-not $WorkBuddyPath) { $WorkBuddyPath = $targetProfile.InstallPath }
+if (-not $ConfigDir) { $ConfigDir = $targetProfile.ConfigDir }
+if (-not $PluginCacheRoot -and $targetProfile.CacheRoot) { $PluginCacheRoot = $targetProfile.CacheRoot }
+if (-not $Overlay) { $Overlay = $targetProfile.Overlay }
+
+$SourceRoots = @()
+if ($Overlay -and (Test-Path -LiteralPath $Overlay)) { $SourceRoots += $Overlay }
+$SourceRoots += $ProjectRoot
 if ($UseCustom) { $SourceRoots = @($CustomRoot) + $SourceRoots }
 
 # Log any uncaught exception so an elevated window does not vanish without a trace
@@ -192,6 +206,7 @@ function Get-ResourceRoot([string]$wb) {
 
 function Get-PluginCacheRoot([string]$explicitRoot) {
     if ($explicitRoot) { return [IO.Path]::GetFullPath($explicitRoot) }
+    if ($ConfigDir) { return [IO.Path]::GetFullPath((Join-Path $ConfigDir "plugins\cache\workbuddy-builtin")) }
     $configDir = $env:WORKBUDDY_CONFIG_DIR
     if (-not $configDir) {
         if (-not $env:USERPROFILE) { throw "USERPROFILE is not set; pass -PluginCacheRoot explicitly." }
@@ -331,7 +346,8 @@ function Ensure-BuiltinSkillCaches([string]$projectRoot, [string]$cacheRoot, [st
 function Register-BuiltinSkills([string[]]$plugins, [string]$cacheRoot, [string]$ver) {
     $added = @()
     if ($plugins.Count -eq 0) { return $added }
-    $path = Join-Path $env:USERPROFILE ".workbuddy\plugins\installed_plugins.json"
+    $registryDir = if ($ConfigDir) { $ConfigDir } else { Join-Path $env:USERPROFILE ".workbuddy" }
+    $path = Join-Path $registryDir "plugins\installed_plugins.json"
     if (-not (Test-Path -LiteralPath $path)) { return $added }
     $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
     if ($null -eq $json.plugins) { return $added }
@@ -578,11 +594,18 @@ if (-not $All -and -not $Template) {
 
 $cacheRoot = Get-PluginCacheRoot $PluginCacheRoot
 $wb = $null
-try {
-    $wb = Resolve-WorkBuddyPath $WorkBuddyPath
-} catch {
-    if (-not $NoInstall) { throw }
-    Write-Host "WorkBuddy install folder not found; continuing with cache-only (-NoInstall)." -ForegroundColor Yellow
+if ($Target -and -not $targetProfile.Installed) {
+    if (-not $NoInstall) {
+        throw "Target '$($targetProfile.Name)' install folder not found: '$($targetProfile.InstallPath)'. Fix $(Join-Path $ScriptRoot 'targets.json') or pass -WorkBuddyPath."
+    }
+    Write-Host "Target '$($targetProfile.Name)' install folder not found; continuing with cache-only (-NoInstall)." -ForegroundColor Yellow
+} else {
+    try {
+        $wb = Resolve-WorkBuddyPath $WorkBuddyPath
+    } catch {
+        if (-not $NoInstall) { throw }
+        Write-Host "WorkBuddy install folder not found; continuing with cache-only (-NoInstall)." -ForegroundColor Yellow
+    }
 }
 
 if ($wb) {
@@ -680,10 +703,13 @@ foreach ($mapping in $mappings) {
 }
 
 $wbLabel = if ($wb) { $wb } else { "(not detected; cache-only)" }
+Write-Host ("Target:      {0} ({1})" -f $targetProfile.Name, $targetProfile.Label)
+Write-Host "ConfigDir:   $ConfigDir"
 Write-Host "WorkBuddy:   $wbLabel"
 Write-Host "Version:     $version"
 Write-Host "Resources:   $resourceRoot"
 Write-Host "PluginCache: $cacheRoot"
+if ($Overlay) { Write-Host "Overlay:     $Overlay" }
 if ($NoPluginCache) { Write-Host "PluginCache: disabled (-NoPluginCache)" }
 Write-Host ("Cache mode:  {0} version dir(s) per plugin" -f $CacheVersions)
 Write-Host ""
@@ -737,6 +763,9 @@ if (-not (Test-Admin) -and -not $NoElevate) {
     Write-Host "Requesting administrator privileges..."
     $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     if ($WorkBuddyPath) { $argLine += " -WorkBuddyPath `"$WorkBuddyPath`"" }
+    if ($Target) { $argLine += " -Target `"$Target`"" }
+    if ($ConfigDir) { $argLine += " -ConfigDir `"$ConfigDir`"" }
+    if ($Overlay) { $argLine += " -Overlay `"$Overlay`"" }
     if ($All) { $argLine += " -All" }
     if ($Template) { $argLine += " -Template `"$Template`"" }
     if ($Source) { $argLine += " -Source `"$Source`"" }
@@ -799,6 +828,9 @@ foreach ($item in $prepared) {
 }
 
 $manifest = [pscustomobject]@{
+    target = $targetProfile.Name
+    targetLabel = $targetProfile.Label
+    configDir = $ConfigDir
     version = $version
     workBuddyPath = $wb
     pluginCacheRoot = $cacheRoot
@@ -810,6 +842,9 @@ $manifestPath = Join-Path $backupDir "manifest.json"
 Write-TextNoBom $manifestPath ($manifest | ConvertTo-Json -Depth 8)
 
 $infoText = @"
+Target=$($targetProfile.Name)
+TargetLabel=$($targetProfile.Label)
+ConfigDir=$ConfigDir
 WorkBuddyPath=$wb
 Version=$version
 PluginCacheRoot=$cacheRoot

@@ -4,6 +4,8 @@ param(
     [string]$Template = "",
     [string]$BackupPath = "",
     [string]$PluginCacheRoot = "",
+    [string]$Target = "",
+    [string]$ConfigDir = "",
     [switch]$All,
     [switch]$Original,
     [switch]$List,
@@ -15,6 +17,12 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptRoot = $PSScriptRoot
 $BackupRoot = Join-Path $ScriptRoot "..\backups"
+
+. (Join-Path $ScriptRoot "target.ps1")
+$targetProfile = Resolve-TargetProfile -Name $Target -ScriptRoot $ScriptRoot -ConfigDirOverride $ConfigDir -InstallOverride $WorkBuddyPath -CacheRootOverride $PluginCacheRoot
+if (-not $WorkBuddyPath) { $WorkBuddyPath = $targetProfile.InstallPath }
+if (-not $ConfigDir) { $ConfigDir = $targetProfile.ConfigDir }
+if (-not $PluginCacheRoot -and $targetProfile.CacheRoot) { $PluginCacheRoot = $targetProfile.CacheRoot }
 
 function Get-LongPath([string]$path) {
     if ($path.StartsWith('\\?\')) { return $path }
@@ -82,6 +90,7 @@ function Get-ResourceRoot([string]$wb) {
 
 function Get-PluginCacheRoot([string]$explicitRoot) {
     if ($explicitRoot) { return [IO.Path]::GetFullPath($explicitRoot) }
+    if ($ConfigDir) { return [IO.Path]::GetFullPath((Join-Path $ConfigDir "plugins\cache\workbuddy-builtin")) }
     $configDir = $env:WORKBUDDY_CONFIG_DIR
     if (-not $configDir) {
         if (-not $env:USERPROFILE) { return "" }
@@ -281,6 +290,23 @@ if (-not $All -and -not $Template -and -not $BackupPath) {
     $All = $true
 }
 
+function Get-BackupTarget([string]$directory) {
+    $manifest = Join-Path $directory "manifest.json"
+    if (-not (Test-Path -LiteralPath $manifest)) { return "" }
+    try {
+        $j = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+        if ($j.target) { return [string]$j.target }
+    } catch { }
+    return ""
+}
+
+function Test-BackupTargetMatch([string]$directory) {
+    if (-not $Target) { return $true }
+    $t = Get-BackupTarget $directory
+    if (-not $t) { return $true }   # legacy backups have no target field
+    return ($t -eq $Target)
+}
+
 if ($List) {
     if (-not (Test-Path -LiteralPath $BackupRoot)) {
         Write-Host "No backup directory found: $BackupRoot"
@@ -296,7 +322,9 @@ if ($List) {
             foreach ($e in $entries) { $cacheCount += @($e.CacheTargets).Count }
             $sample = ($entries | Select-Object -First 3 | ForEach-Object { $_.Target }) -join ", "
             if ($entries.Count -gt 3) { $sample += ", ..." }
-            Write-Host ("{0}  files={1}  cache={2}  {3}" -f $_.Name, $entries.Count, $cacheCount, $version)
+            $tName = Get-BackupTarget $_.FullName
+            $tLabel = if ($tName) { $tName } else { "legacy" }
+            Write-Host ("{0}  files={1}  cache={2}  {3}  target={4}" -f $_.Name, $entries.Count, $cacheCount, $version, $tLabel)
             Write-Host ("    {0}" -f $sample)
         }
     exit 0
@@ -305,7 +333,7 @@ if ($List) {
 $wb = Resolve-WorkBuddyPath $WorkBuddyPath
 $resourceRoot = Get-ResourceRoot $wb
 $cacheRoot = Get-PluginCacheRoot $PluginCacheRoot
-$userSkillsRoot = if ($UserSkillsRoot) { [IO.Path]::GetFullPath($UserSkillsRoot) } else { [IO.Path]::Combine($env:USERPROFILE, ".workbuddy", "skills") }
+$userSkillsRoot = if ($UserSkillsRoot) { [IO.Path]::GetFullPath($UserSkillsRoot) } else { [IO.Path]::Combine($ConfigDir, "skills") }
 
 $targetFilter = ""
 if ($Template) { $targetFilter = Resolve-TargetRelative $Template }
@@ -358,6 +386,7 @@ if ($BackupPath) {
 } elseif ($targetFilter) {
     $found = $false
     foreach ($dir in $backupDirs) {
+        if (-not (Test-BackupTargetMatch $dir.FullName)) { continue }
         $entries = @(Get-BackupEntries $dir.FullName)
         $match = @($entries | Where-Object { $_.Target -eq $targetFilter })
         if ($match.Count -gt 0) {
@@ -373,6 +402,7 @@ if ($BackupPath) {
     if ($Original) {
         $seen = @{}
         foreach ($dir in $backupDirs) {
+            if (-not (Test-BackupTargetMatch $dir.FullName)) { continue }
             foreach ($entry in @(Get-BackupEntries $dir.FullName)) {
                 if (-not $seen.ContainsKey($entry.Target)) {
                     $seen[$entry.Target] = $entry
@@ -383,6 +413,7 @@ if ($BackupPath) {
         $selectedEntries = @($seen.Values)
     } else {
         foreach ($dir in $backupDirs) {
+            if (-not (Test-BackupTargetMatch $dir.FullName)) { continue }
             $entries = @(Get-BackupEntries $dir.FullName)
             if ($entries.Count -gt 0) {
                 $selectedEntries = $entries
@@ -469,6 +500,8 @@ if (-not (Test-Admin) -and -not $NoElevate) {
     Write-Host "Requesting administrator privileges..."
     $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     if ($WorkBuddyPath) { $argLine += " -WorkBuddyPath `"$WorkBuddyPath`"" }
+    if ($Target) { $argLine += " -Target `"$Target`"" }
+    if ($ConfigDir) { $argLine += " -ConfigDir `"$ConfigDir`"" }
     if ($All) { $argLine += " -All" }
     if ($Original) { $argLine += " -Original" }
     if ($Template) { $argLine += " -Template `"$Template`"" }

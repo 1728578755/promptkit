@@ -72,18 +72,34 @@ npm run check    # 结构断言：无模板残留、关键段落与模式边界
 ## 一键部署（Windows）
 
 ```bat
-scripts\deploy.cmd
-scripts\deploy.cmd -DryRun
-scripts\deploy.cmd -NoInstall
+scripts\deploy.cmd -ListTargets                    :: 自动发现所有已安装运行时
+scripts\deploy.cmd -Target workbuddy-ai
+scripts\deploy.cmd -Target workbuddy-ai -Elevate   :: 连安装镜像一起写（UAC）
+scripts\deploy.cmd -Target workbuddy-ai -DryRun
 scripts\deploy.cmd -Template welcome-mode\work.tpl
 scripts\deploy.cmd -Skill team-orchestration
 ```
 
-`deploy.ps1` 自动检测已安装的运行时（安装目录 + 插件缓存），不需要配置文件：
+**不依赖任何写死的目录**。`scripts\targets.json` 出厂路径为空，安装点由 `scripts\target.ps1` 现场发现：
 
-- 管理员：同时写安装镜像与插件缓存；非管理员：只写插件缓存（运行时读取点）。
-- 找不到安装目录时，非管理员自动退化为只写缓存，`verify` 也只校验缓存，不会中断；管理员仍会报错并提示 `-WorkBuddyPath`。
-- 覆盖前备份到 `backups/<timestamp>/`，逐文件 SHA256 校验。
+| 侧 | 来源 |
+|---|---|
+| 安装 | 卸载注册表（`DisplayName like *WorkBuddy*`）、`App Paths`、运行中的 `WorkBuddy*` 进程、每个固定盘的 `<盘>:\Program Files*\WorkBuddy*` |
+| 数据 | `%USERPROFILE%\.workbuddy*`、`WORKBUDDY_CONFIG_DIR` |
+| 配对 | `<数据目录>\.skill-list-cache.json` 的 `scopeKey` 里那条 `...\<安装目录>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills` |
+
+目标 id 由安装目录名推导（`WorkBuddy` → `workbuddy`，`WorkBuddyAI` → `workbuddy-ai`）。只有需要钉死某个路径时，才在 `targets.json` 里填 `installPath` / `configDir`。
+
+### 提示词与技能是两个读取点
+
+| 资产 | 读自 | 写入条件 |
+|---|---|---|
+| 模板、片段、交互模式文本 | `<数据目录>\plugins\cache\workbuddy-builtin\<插件>\<版本>\` | 任意 deploy，**不需要管理员** |
+| 内置技能 `SKILL.md` | `<安装目录>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills\`（用户技能另在 `<数据目录>\skills\`）——**从不读插件缓存** | 需要 `-Elevate` 或管理员终端 |
+
+所以非管理员部署只改提示词，技能不会出现：`deploy.ps1` 会直接打印 `!! SKILLS NOT ACTIVE: n/7 ...` 并给出 `-Elevate` 命令。应用升级会覆盖安装目录，**每次升级后重跑一次 `deploy.cmd -Target <id> -Elevate`**。
+
+- 覆盖前备份到 `backups/<timestamp>/`（manifest 记录 `target`），逐文件 SHA256 校验。
 - 校验 7 个内置技能，然后跑一致性检查；`-SkipVerify` 可跳过。
 - `-Detailed` 输出完整映射；`-Template` / `-Skill` 只替换单个文件或技能。
 
@@ -92,6 +108,8 @@ scripts\deploy.cmd -Skill team-orchestration
 `plugins/` 下的技能按“触发条件 + 操作流程”组织，包含定时任务、邮件、设计稿验收、团队编排、产品文档查询等工作流。每个技能只在自己的任务出现时加载，不进入每轮常驻上下文。
 
 部署脚本会把 `plugins/` 下的技能写到运行时的技能目录并完成登记；只改一个技能时用 `scripts\deploy.cmd -Skill <name>`。不要把内部路径、凭据、个人配置写进提示词。
+
+> 技能能不能被模型自动调用，取决于它是否出现在运行时的技能清单里——而清单只扫描安装目录与用户技能目录。只写插件缓存 = 提示词里提到技能名、模型却找不到，表现上就是“改了不生效”。
 
 ## 不包含
 
