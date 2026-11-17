@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.1.2**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.1.3**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -141,14 +141,19 @@ scripts\deploy.cmd -AsarRestore           :: 还原 app.asar
 
 一次运行会把**所有发现的安装**都改掉，不需要为每个安装各跑一次。
 
-**不依赖任何写死的目录**。`scripts\targets.json` 出厂路径为空，安装点由 `scripts\target.ps1` 现场发现：
+**不依赖任何写死的目录**。`scripts\targets.json` 出厂路径为空，安装点由 `scripts\target.ps1` 现场发现。
+**安装目录不假定在 `Program Files`**，按下面顺序逐级尝试：
 
-| 侧 | 来源 |
+| 优先级 | 来源 |
 |---|---|
-| 安装 | 卸载注册表（`DisplayName like *WorkBuddy*`）、`App Paths`、运行中的 `WorkBuddy*` 进程、每个固定盘的 `<盘>:\Program Files*\WorkBuddy*` |
-| 数据 | `%USERPROFILE%\.workbuddy*`、`WORKBUDDY_CONFIG_DIR` |
-| 配对 | `<数据目录>\.skill-list-cache.json` 的 `scopeKey` 里那条 `...\<安装目录>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills` |
+| 1 显式 | `-WorkBuddyPath` / `-ConfigDir`，或 `targets.json` 的 `installPath` / `configDir` |
+| 2 配对（最可靠） | `<数据目录>\.skill-list-cache.json` 的 `scopeKey` 反查安装目录；`settings.json` 里的 `...\resources\app.asar.unpacked` 兜底 |
+| 3 注册表 | `App Paths`（遍历整棵子树，`WorkBuddy*.exe` 都算）、卸载项（DisplayName / Publisher / InstallLocation 任一含 WorkBuddy） |
+| 4 运行痕迹 | 运行中的进程、`PATH`、开始菜单快捷方式（用户级 + 全局） |
+| 5 常见位置 | `%LOCALAPPDATA%\Programs`、`%APPDATA%`、`scoop\apps`、`%ProgramData%`、各固定盘 `Program Files*`、盘根与盘根下一层的 `WorkBuddy*` |
+| 6 扫盘兜底 | 1–5 全落空且显式点名了 `-Target` 时，扫 `<盘>:\WorkBuddy*`、`<盘>:\*\WorkBuddy*`、`<盘>:\Program Files*\WorkBuddy*` |
 
+主程序按 `WorkBuddy*.exe` 通配识别；安装目录名可以任意，只要里面有 `resources\app.asar` 或 `WorkBuddy*.exe` 就认。
 目标 id 由安装目录名推导（`WorkBuddy` → `workbuddy`，`WorkBuddyAI` → `workbuddy-ai`）；数据目录先按上面的配对反查，配不上才退回 `%USERPROFILE%\.<id>`。只有需要钉死某个路径时，才在 `targets.json` 里填 `installPath` / `configDir`。
 
 ### 提示词与技能是两个读取点

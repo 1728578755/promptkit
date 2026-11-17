@@ -54,35 +54,6 @@ function Test-Admin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Resolve-WorkBuddyPath([string]$explicitPath) {
-    $candidates = New-Object System.Collections.Generic.List[string]
-    if ($explicitPath) { $candidates.Add($explicitPath) }
-    if ($env:ProgramFiles) { $candidates.Add((Join-Path $env:ProgramFiles "WorkBuddy")) }
-    if (${env:ProgramFiles(x86)}) { $candidates.Add((Join-Path ${env:ProgramFiles(x86)} "WorkBuddy")) }
-    if ($env:LOCALAPPDATA) { $candidates.Add((Join-Path $env:LOCALAPPDATA "Programs\WorkBuddy")) }
-
-    $registryRoots = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    )
-    foreach ($root in $registryRoots) {
-        try {
-            Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
-                Where-Object { $_.DisplayName -like "*WorkBuddy*" -and $_.InstallLocation } |
-                ForEach-Object { $candidates.Add($_.InstallLocation) }
-        } catch { }
-    }
-
-    foreach ($candidate in $candidates) {
-        if (-not $candidate) { continue }
-        $template = Join-Path $candidate "resources\app.asar.unpacked\resources\templates\workbuddy-prompt.tpl"
-        if (Test-Path -LiteralPath $template) {
-            return (Resolve-Path -LiteralPath $candidate).Path
-        }
-    }
-    throw "WorkBuddy installation not found. Pass -WorkBuddyPath 'C:\Program Files\WorkBuddy'."
-}
 
 function Get-ResourceRoot([string]$wb) {
     return (Join-Path $wb "resources\app.asar.unpacked\resources")
@@ -331,7 +302,10 @@ if ($List) {
     exit 0
 }
 
-$wb = Resolve-WorkBuddyPath $WorkBuddyPath
+$wb = if ($WorkBuddyPath) { $WorkBuddyPath } elseif ($targetProfile.Installed) { $targetProfile.InstallPath } else { "" }
+if (-not $wb) {
+    throw "Install folder not found for '$($targetProfile.Name)'. Pass -WorkBuddyPath '<folder containing WorkBuddy*.exe>', or restore cache files via -PluginCacheRoot / -ConfigDir."
+}
 $resourceRoot = Get-ResourceRoot $wb
 $cacheRoot = Get-PluginCacheRoot $PluginCacheRoot
 $userSkillsRoot = if ($UserSkillsRoot) { [IO.Path]::GetFullPath($UserSkillsRoot) } else { [IO.Path]::Combine($ConfigDir, "skills") }

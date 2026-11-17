@@ -72,6 +72,17 @@ function Test-Admin {
 
 $isAdmin = Test-Admin
 
+# 把已解析的路径交给子脚本（apply/restore/verify/pull），子进程不再重复扫盘，
+# 也不会因为环境差异解析到另一套安装。
+function Set-TargetEnv($profile) {
+    $key = ($profile.Name -replace '[^A-Za-z0-9]', '_').ToUpperInvariant()
+    foreach ($pair in @(@("INSTALL", $profile.InstallPath), @("CONFIG", $profile.ConfigDir))) {
+        $name = "Env:PROMPTKIT_TARGET_{0}_{1}" -f $key, $pair[0]
+        if ($pair[1]) { Set-Item -Path $name -Value $pair[1] -ErrorAction SilentlyContinue }
+        else { Remove-Item -Path $name -ErrorAction SilentlyContinue }
+    }
+}
+
 # One action wins; order matters only for accidental combinations.
 $action = "deploy"
 if ($ListTargets) { $action = "list" }
@@ -232,6 +243,7 @@ function Invoke-AsarPatch($profile, $result) {
 }
 
 function Invoke-DeployTarget($profile) {
+    Set-TargetEnv $profile
     $result = New-Result $profile.Name $profile.Label "deploy"
     if (-not $profile.Installed -and -not $profile.ConfigExists) {
         Add-Note $result "not installed"
@@ -296,6 +308,7 @@ function Invoke-DeployTarget($profile) {
 }
 
 function Invoke-RestoreTarget($profile) {
+    Set-TargetEnv $profile
     $result = New-Result $profile.Name $profile.Label "restore"
     $restoreArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptRoot "restore.ps1"),
                      "-NoElevate", "-Target", $profile.Name)
@@ -320,6 +333,7 @@ function Invoke-RestoreTarget($profile) {
 }
 
 function Invoke-VerifyTarget($profile) {
+    Set-TargetEnv $profile
     $result = New-Result $profile.Name $profile.Label "verify"
     $verifyArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptRoot "verify.ps1"),
                     "-Target", $profile.Name, "-CheckIncludes")
@@ -338,6 +352,7 @@ function Invoke-VerifyTarget($profile) {
 }
 
 function Invoke-PullTarget($profile) {
+    Set-TargetEnv $profile
     $result = New-Result $profile.Name $profile.Label "pull"
     $pullArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptRoot "pull.ps1"), "-Target", $profile.Name)
     if ($Scope) { $pullArgs += @("-Scope", $Scope) }
@@ -352,6 +367,7 @@ function Invoke-PullTarget($profile) {
 }
 
 function Invoke-AsarTarget($profile, [string]$mode) {
+    Set-TargetEnv $profile
     $result = New-Result $profile.Name $profile.Label ("asar-" + $mode)
     if (-not $profile.Installed) { Add-Note $result "not installed"; return $result }
     $script = Join-Path $ScriptRoot "patch-asar.py"

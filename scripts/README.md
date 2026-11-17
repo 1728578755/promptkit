@@ -39,17 +39,25 @@ with one summary table and a non-zero exit code if any target failed.
 
 ### Installations are discovered, not configured
 
-`scripts\targets.json` ships with empty paths and no default target. Discovery walks:
+`scripts\targets.json` ships with empty paths and no default target. **The install folder is not assumed to be
+under `Program Files`** — resolution tries, in order:
 
-| side | sources |
+| order | source |
 |---|---|
-| install | uninstall registry (`DisplayName like *WorkBuddy*`), `App Paths`, running `WorkBuddy*` processes, `<drive>:\Program Files*\WorkBuddy*` on every fixed drive |
-| data | `%USERPROFILE%\.workbuddy*` and `WORKBUDDY_CONFIG_DIR` |
-| pairing | `<data>\.skill-list-cache.json` → `scopeKey` entry `...\<install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills` |
+| 1 explicit | `-WorkBuddyPath` / `-ConfigDir`, or `installPath` / `configDir` in `targets.json` |
+| 2 pairing (best) | `<data>\.skill-list-cache.json` → `scopeKey` entry `...\<install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills`; falls back to `settings.json` |
+| 3 registry | `App Paths` (whole subtree, any `WorkBuddy*.exe`), uninstall entries (DisplayName / Publisher / InstallLocation) |
+| 4 runtime traces | running processes, `PATH`, Start Menu shortcuts (machine + user) |
+| 5 common places | `%LOCALAPPDATA%\Programs`, `%APPDATA%`, `scoop\apps`, `%ProgramData%`, `<drive>:\Program Files*\WorkBuddy*`, the drive root and one level below it |
+| 6 drive scan | only when 1–5 fail and `-Target` was named explicitly: `<drive>:\WorkBuddy*`, `<drive>:\*\WorkBuddy*`, `<drive>:\Program Files*\WorkBuddy*` |
 
+The executable is matched as `WorkBuddy*.exe` (so `WorkBuddy.exe`, `WorkBuddyAI.exe`, `WorkBuddy Beta.exe` all work);
+the folder name can be anything as long as it holds `resources\app.asar` or a matching exe.
 Target ids are derived from the install folder (`WorkBuddy` → `workbuddy`, `WorkBuddyAI` → `workbuddy-ai`).
 The data directory is taken from the pairing above; only when no pairing exists does it fall back to
-`%USERPROFILE%\.<id>`. Nothing in the scripts contains a hard-coded product directory: the child shell comes
+`%USERPROFILE%\.<id>`. The resolved paths are handed to child scripts through
+`PROMPTKIT_TARGET_<ID>_INSTALL` / `_CONFIG`, so `apply` / `verify` / `restore` / `pull` never scan again.
+Nothing in the scripts contains a hard-coded product directory: the child shell comes
 from `$PSHOME`, and python is looked up in `<data>\binaries\python\versions` before any user-level install.
 Fill `installPath` / `configDir` in `targets.json` only to pin a path.
 
