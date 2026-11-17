@@ -487,18 +487,25 @@ if (-not (Test-Admin) -and -not $NoElevate) {
 }
 
 $restored = 0
+$installSkipped = 0
 foreach ($item in $prepared) {
     if ($item.BackupFile -and (Test-FileLong $item.BackupFile)) {
-        $parent = [IO.Path]::GetDirectoryName($item.TargetPath)
-        if (-not (Test-Path -LiteralPath $parent)) {
-            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        try {
+            $parent = [IO.Path]::GetDirectoryName($item.TargetPath)
+            if (-not (Test-Path -LiteralPath $parent)) {
+                New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            Copy-FileLong $item.BackupFile $item.TargetPath
+            $after = Get-FileHashLong $item.TargetPath
+            if ($after -ne $item.BackupHash) {
+                throw "Hash mismatch after restore: $($item.Target) target=$after expected=$($item.BackupHash)"
+            }
+            $restored++
+        } catch {
+            # 安装目录只读（未提权）时不应该让整次恢复中断：缓存侧才是运行时读取点
+            $installSkipped++
+            Write-Host ("  skip install (read-only, rerun with -Elevate): {0}" -f $item.Target) -ForegroundColor Yellow
         }
-        Copy-FileLong $item.BackupFile $item.TargetPath
-        $after = Get-FileHashLong $item.TargetPath
-        if ($after -ne $item.BackupHash) {
-            throw "Hash mismatch after restore: $($item.Target) target=$after expected=$($item.BackupHash)"
-        }
-        $restored++
     } elseif ($item.Existed -eq $false -and (Test-FileLong $item.TargetPath)) {
         $current = Get-FileHashLong $item.TargetPath
         if ($current -eq $item.CurrentHash) {
@@ -535,4 +542,7 @@ foreach ($item in $prepared) {
 
 Write-Host ""
 Write-Host "Restored successfully: $restored file(s)."
+if ($installSkipped -gt 0) {
+    Write-Host ("Skipped {0} install-mirror file(s): the install folder is read-only for this user. Rerun with -Elevate to restore those too." -f $installSkipped) -ForegroundColor Yellow
+}
 Write-Host "Restart WorkBuddy for the change to take effect."

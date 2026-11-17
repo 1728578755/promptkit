@@ -1,8 +1,9 @@
 # Scripts
 
-## One entry: deploy, restore, verify, pull, asar
+## Two double-click entries, one implementation
 
-`scripts\deploy.cmd` is the only entry point. Everything else is an engine it calls.
+`scripts\deploy.cmd` deploys; `scripts\restore.cmd` is a thin wrapper that restores (it simply calls
+`deploy.ps1 -Restore`). Everything else is an engine those two call.
 
 ```bat
 :: deploy to EVERY discovered installation (CN + AI in one run)
@@ -15,13 +16,15 @@ scripts\deploy.cmd -Template welcome-mode\work.tpl
 scripts\deploy.cmd -Skill team-orchestration
 scripts\deploy.cmd -SkipAsarPatch      :: skip the app.asar patch that a deploy otherwise applies
 
-::- restore
-scripts\deploy.cmd -Restore
-scripts\deploy.cmd -Restore -List
-scripts\deploy.cmd -Restore -BackupPath backups\<timestamp>
-scripts\deploy.cmd -Restore -Template welcome-mode\work.tpl
-scripts\deploy.cmd -Restore -Original
-scripts\deploy.cmd -Restore -DryRun
+::- restore (one click: put every installation back to its latest backup)
+scripts\restore.cmd
+scripts\restore.cmd -List
+scripts\restore.cmd -BackupPath backups\<timestamp>
+scripts\restore.cmd -Template welcome-mode\work.tpl
+scripts\restore.cmd -Original
+scripts\restore.cmd -Target workbuddy-ai
+scripts\restore.cmd -Elevate           :: restore the install mirror too (one UAC)
+scripts\restore.cmd -DryRun
 
 ::- verify / snapshot / asar
 scripts\deploy.cmd -Verify
@@ -34,7 +37,7 @@ scripts\deploy.cmd -AsarRestore
 `apply.ps1` → product overrides (when present) → `app.asar` patch (when present) → `verify.ps1`,
 with one summary table and a non-zero exit code if any target failed.
 
-`deploy.cmd` only pauses when it is started with no arguments (double-click); a scripted call such as
+Both `.cmd` files only pause when started with no arguments (double-click); a scripted call such as
 `deploy.cmd -Target workbuddy` returns instead of waiting for a keypress.
 
 ### Installations are discovered, not configured
@@ -125,7 +128,8 @@ turn the gate on with `--mode-threshold N`.
 
 ## Files
 
-- `deploy.cmd` / `deploy.ps1` — the only entry: target discovery, one-shot elevation, then
+- `deploy.cmd` / `restore.cmd` — the two double-click entries; `restore.cmd` is a wrapper over `deploy.ps1 -Restore`.
+- `deploy.ps1` — dispatcher: target discovery, one-shot elevation, then
   deploy / `-Restore` / `-Verify` / `-Pull` / `-Asar` / `-AsarRestore` for every target.
 - `target.ps1` / `targets.json` — installation discovery, data-dir pairing, multi-target resolution, optional path pins.
 - `apply.ps1` — copy engine: source tree → install mirror + plugin cache, backups, skill registration.

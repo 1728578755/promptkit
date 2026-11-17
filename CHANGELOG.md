@@ -2,6 +2,23 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.1.5 — 2026-11-17
+
+主题：**一键恢复脚本。**
+
+- 新增 `scripts\restore.cmd`，双击即把每个已发现的安装恢复到最近一次备份；它只是 `deploy.ps1 -Restore` 的包装，
+  两个入口共用一套实现：
+  `restore.cmd` / `-List` / `-Original` / `-Target <id>` / `-BackupPath <dir>` / `-Template <path>` / `-Elevate` / `-DryRun`。
+- `restore.ps1`：安装目录只读时不再中断整次恢复——逐项捕获、跳过并计数，末尾提示
+  `Skipped N install-mirror file(s) ... rerun with -Elevate`；缓存侧（运行时真正读取的位置）照常恢复。
+- 文档：README × 2 说明"两个双击入口、一套实现"；`scripts/README.md` 的 Files 节补 `restore.cmd`。
+
+实测（非管理员）：
+
+- `restore.cmd -DryRun` / `-List` 正常；真实执行 `-Restore -Target all` 与 `-Restore -Target workbuddy` 均退出码 0，
+  分别恢复 148 / 282 个缓存文件，缓存内容哈希保持 `b432ca80…`（备份内容与当前一致，属预期）。
+- 备份集里没有安装镜像条目时逐项显示 `remove (was new)` / `skip remove (no install copy expected)`，不会误删安装目录文件。
+
 ## v1.1.4 — 2026-11-17
 
 主题：**只从系统登记的信息取安装位置，不再扫盘。**

@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.1.4**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.1.5**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -117,7 +117,10 @@ npm run check         # 结构断言：无模板残留、关键段落、模式�
 
 ## 一键部署与恢复（Windows）
 
-**只有一个入口** `scripts\deploy.cmd`，部署、恢复、校验、快照、`app.asar` 都是它的动作：
+**两个双击入口，一套实现**：
+
+- `scripts\deploy.cmd`：部署（以及 `-Verify` / `-Pull` / `-Asar` 等动作）。
+- `scripts\restore.cmd`：一键恢复，等价于 `deploy.cmd -Restore`，双击即把每个已发现的安装恢复到最近一次备份。
 
 ```bat
 scripts\deploy.cmd                        :: 部署到所有已发现的安装（CN + AI 一起改）
@@ -128,10 +131,12 @@ scripts\deploy.cmd -DryRun                :: 预演，不写文件
 scripts\deploy.cmd -Template welcome-mode\work.tpl
 scripts\deploy.cmd -Skill team-orchestration
 
-scripts\deploy.cmd -Restore               :: 每个目标恢复到最近一次备份
-scripts\deploy.cmd -Restore -List         :: 列出每个目标的备份集
-scripts\deploy.cmd -Restore -BackupPath backups\<timestamp>
-scripts\deploy.cmd -Restore -Original     :: 恢复原始基线
+scripts\restore.cmd                       :: 一键恢复：每个目标回到最近一次备份
+scripts\restore.cmd -List                 :: 列出每个目标的备份集
+scripts\restore.cmd -Original             :: 恢复原始基线
+scripts\restore.cmd -Target workbuddy-ai  :: 只恢复一套
+scripts\restore.cmd -Elevate              :: 连安装镜像一起恢复（一次 UAC）
+scripts\restore.cmd -DryRun               :: 只看计划
 
 scripts\deploy.cmd -Verify                :: 每个目标的一致性校验（含 include 解析）
 scripts\deploy.cmd -Pull                  :: 每个目标快照到 archive\pulls\
