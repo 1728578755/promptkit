@@ -45,6 +45,7 @@ param(
     [string]$Expect = "",
     [string]$Absent = "",
     [switch]$ListTraces,
+    [string]$TraceFile = "",
 
     # --- pull options (forwarded to pull.ps1) ---
     [string]$Scope = "",
@@ -326,6 +327,7 @@ function Invoke-VerifyTarget($profile) {
     if ($Expect) { $verifyArgs += @("-Expect", $Expect) }
     if ($Absent) { $verifyArgs += @("-Absent", $Absent) }
     if ($ListTraces) { $verifyArgs += "-ListTraces" }
+    if ($TraceFile) { $verifyArgs += @("-TraceFile", $TraceFile) }
     if ($ConfigDir) { $verifyArgs += @("-ConfigDir", $ConfigDir) }
     if ($PluginCacheRoot) { $verifyArgs += @("-PluginCacheRoot", $PluginCacheRoot) }
     $code = Invoke-Child $verifyArgs
