@@ -1,7 +1,6 @@
 ---
 name: workbuddy-finance-skill
-description: >-
-  金融/投资/股票/基金/ETF/板块/指数/宏观/外汇/大宗商品/财报/估值/持仓/交易/量化/选股/期权/衍生品/投行建模/技术指标/行情等——金融场景总入口，优先级高于其他金融skill。涉及任一上述领域和相关金融场景时（包括字面未明说但本质相关），都务必**第一时间优先加载本skill**。
+description: 金融场景总入口，优先级高于其它金融 skill：投资/股票/基金/ETF/指数/宏观/外汇/大宗商品/财报/估值/持仓/交易/量化/选股/期权/衍生品/投行建模/技术指标/行情。涉及任一领域即优先加载，含字面未提但本质相关的场景。
 description_en: >-
   The primary entry point for finance, investing, stocks, funds, ETFs, sectors, indices, macroeconomics, foreign exchange, commodities, financial statements, valuation, portfolios, trading, quantitative research, factors, backtesting, stock screening, options, derivatives, investment-banking models, technical indicators, market monitoring, and alerts. Load this skill first whenever a request concerns any of these topics, even if finance-related keywords are implicit.
 when_to_use: >-
@@ -14,7 +13,6 @@ when_to_use: >-
   (f) 投行文书 / 交易准备类(最易当作"通识写作"裸答，必须读 ib-deal-prep / ib-models reference)——"NDA / 保密协议 怎么写""pitch deck 结构有什么讲究""投委会备忘录 / IC memo 怎么准备""流程函 / process letter 怎么写""尽调清单 / DD list 怎么列""teaser / 匿名预告 怎么写""信息备忘录 / IM 数据包结构""融资摘要 / 融资 deck 写法""路演材料怎么准备"。
 version: 1.7.3
 ---
-
 ## 触发顺序硬约束
 - 必须**先**加载 workbuddy-finance-skill 读取红线、时区口径、路由与输出规范，任何涉及金融市场数据的请求，**都要**优先使用用户已连接的金融类 MCP，其次调用 domain_search 工具检索数据，以上两步都无法获取所需数据时才考虑使用 WebSearch 检索；**禁止跳过本 skill 直接裸答或者凭记忆回答。**
 

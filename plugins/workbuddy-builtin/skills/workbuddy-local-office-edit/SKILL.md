@@ -2,12 +2,11 @@
 name: workbuddy-local-office-edit
 display_name_zh: 本地文档编辑
 display_name_en: Local Office Editing
-description: 通过本地 editor_sdk 实时读写本机磁盘上的 Office/WPS 类型文件——文件打开后用户在编辑器中实时可见，编辑所见即所得，保存用 save_file 即可、不要主动 close_file。适用于本地 doc/docx/dot/wps/wpt、xls/xlsx/xlt/csv/tsv、ppt/pptx/pps/pot 等文件的打开、编辑、保存与新建；含宏格式可打开但宏不执行，et/ett/dps/dpt 不支持。按 doc/sheet/slide 三类调用对应工具，调用任一编辑工具前先用 edsdk.py schema 查它单个的参数、不要凭摘要猜参数。所有操作经本目录 edsdk.py（python3 edsdk.py list/schema/call）封装，端点自动发现、上层无需关心底层细节。触发词：本地文档、本机 docx/xlsx/pptx/wps、Office/WPS 文件、editor_sdk、edsdk.py、本地编辑、实时编辑。
+description: 本机 Office/WPS 文件实时编辑：doc/docx/dot/wps/wpt、xls/xlsx/xlt/csv/tsv、ppt/pptx/pps/pot 的打开、新建、编辑、保存，编辑结果在用户编辑器中实时可见。经 edsdk.py 调用，调任一编辑工具前先查该工具 schema。宏不执行，et/ett/dps/dpt 不支持。
 description_en: Read and edit local Office/WPS files in real time through the local editor SDK. Use for opening, creating, editing, and saving local DOC/DOCX/WPS, XLS/XLSX/CSV/TSV, and PPT/PPTX files. Route document, spreadsheet, and presentation operations through the corresponding tools, inspect each tool's schema before calling it, and use edsdk.py as the only integration entry point.
 author: Tencent Docs
 version: "0.0.9"
 ---
-
 # 本地 editor_sdk MCP 应用
 
 > 面向**本机磁盘文档**，通过本地 `editor_sdk` 进程的 MCP 服务读写。支持编辑的格式按三个品类归类：

@@ -2,7 +2,6 @@
 name: workbuddy-docs
 description: 问 WorkBuddy 自身功能怎么用/怎么配置（MCP、hooks、slash commands、设置项、快捷键）时使用；先 WebFetch 官方文档再回答，不猜 UI 路径。
 ---
-
 # WorkBuddy docs
 
 Use the official docs before answering questions about WorkBuddy features or configuration.

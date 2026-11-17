@@ -1,8 +1,7 @@
 ---
 name: buddy-image-processing
-description: Process existing images with text and watermark removal, general enhancement, portrait beautification, image restoration, and general matting.
+description: Process existing images: text and watermark removal, enhancement, portrait beautification, restoration, matting.
 ---
-
 # Image Processing
 
 Use `buddy-image-processing.py` only when the user provides an existing image and requests one of the supported processing operations.

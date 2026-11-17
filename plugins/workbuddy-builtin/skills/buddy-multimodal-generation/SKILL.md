@@ -2,7 +2,6 @@
 name: buddy-multimodal-generation
 description: Generate 3D models or apply template-based image-to-video effects. Use ImageGen for image generation and VideoGen for general video generation.
 ---
-
 # Multimodal Creation and Processing
 
 Use `buddy-multimodal-generation.py` for the following tasks:

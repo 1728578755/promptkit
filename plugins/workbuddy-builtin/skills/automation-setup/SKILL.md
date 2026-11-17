@@ -2,7 +2,6 @@
 name: automation-setup
 description: 定时/重复任务、提醒、日程、推迟/改期/暂停/删除自动化时使用；schedule/reminder/cron 触发。
 ---
-
 # Automation setup
 
 One automation per logical task. Before creating anything, call `automation_update` with `mode: "list"` and reuse or update an existing one instead of adding a duplicate.

@@ -1,11 +1,10 @@
 ---
 name: miora-creative-core
-description: 创意媒体生成的通用底座。当交付物是 AI 生成的图片或视频时使用——覆盖意图识别与场景判定、输入与参数契约、生成前确认与费用边界、生成工具路由、失败处理、产物引用、落到 Miora 画布交付与交付验证。本 skill 不能单独覆盖任一交付物类型，始终与匹配的领域 skill（miora-brand-design / miora-image-generation / miora-video-generation）配对使用。
+description: 创意媒体生成底座：交付物是 AI 生成图片/视频时加载，覆盖意图与场景判定、输入参数契约、生成前确认与费用边界、工具路由、失败处理、产物引用、画布交付验证。不能单独交付，须与 miora-brand-design / miora-image-generation / miora-video-generation 之一配对。
 allowed-tools: 
 disable-model-invocation: true
 user-invocable: false
 ---
-
 # Miora Creative Core
 
 ## 标准流程

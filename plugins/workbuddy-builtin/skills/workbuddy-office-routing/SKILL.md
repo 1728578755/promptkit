@@ -2,12 +2,11 @@
 name: workbuddy-office-routing
 display_name_zh: Office 文件路由
 display_name_en: Office Routing
-description: Load this Skill before handling local files such as pdf (read / summarize / ask → the `workbuddy-pdf` Skill), doc/docx/dot/wps/wpt, xls/xlsx/xlt/csv/tsv, or ppt/pptx/pps/pot, and before creating a new local document, spreadsheet, or presentation. Load first whenever the user uploads, mentions, previews, reads, edits, or asks to create such a local file, to decide whether to use the PDF Skill, the local office editing Skill, the local spreadsheet agent, the spreadsheet generation Skill, or the PPT Skill (`workbuddy-pptx` for generate / understand / edit). Text-based outputs such as speech scripts, talking points, copywriting, summaries, reports, or meeting minutes should default to local DOCX unless the user explicitly specifies another local format such as markdown or plain text. Other file types are out of scope.
+description: 本地文件路由：pdf、doc·docx·dot·wps·wpt、xls·xlsx·xlt·csv·tsv、ppt·pptx·pps·pot 的读、预览、编辑、新建前先加载，由它选 workbuddy-pdf / workbuddy-local-office-edit / 表格 agent / workbuddy-sheet-generation / workbuddy-pptx。纯文本产物（讲稿、文案、总结、报告、纪要）默认 DOCX。
 author: Tencent Docs
 version: "0.1.9"
 user-invocable: false
 ---
-
 # Local Office/WPS Routing
 
 > **This is the gate you MUST read before handling local files — reading, summarizing, searching, or answering questions about a PDF, or working with doc/docx/dot/wps/wpt, xls/xlsx/xlt/csv/tsv, or ppt/pptx/pps/pot — AND before generating/creating any new local document, spreadsheet, or presentation.** This Skill only describes local file operations. It routes **content** work only — reading a document's content into context, editing, creating, transforming, and the like. Simply opening, previewing, or presenting a document for the user to *view* is the host's preview/present surface, not content work — call the host preview/present tool directly instead of routing it through this Skill.

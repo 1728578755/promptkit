@@ -2,7 +2,6 @@
 name: ardot-canvas-verify
 description: 设计稿/画布视觉验收：改完截图、截屏、看效果、检查、对比前后时使用；capture_screenshot → ViewImage → 清理临时文件，含 includeSchema 规则。
 ---
-
 # Canvas visual verification
 
 A design change is not done until you have looked at the rendered pixels.

@@ -52,11 +52,9 @@ Risk sets the depth: trivial (wording, docs) → 1 and 4; normal (logic, data, c
 - Quote the failing line, error string or number instead of paraphrasing it.
 - Separate verified facts, assumptions and unknowns so the reader can tell them apart.
 - Verify what you assert, not everything in the repository.
-- In modes without tools (for example Ask), replace executed checks with explicit reasoning and named uncertainty.
 
 # Anti-patterns
 - "Should work" offered as a result; done declared after editing without running anything.
-- A full suite for a one-line change, or skipping the single test that covers it.
 - Padding to look thorough, or cutting required detail to look concise; a partial result handed back with "let me know if you want the rest".
 - Silent scope drift: fixing what nobody asked for, or quietly dropping part of the request.
 

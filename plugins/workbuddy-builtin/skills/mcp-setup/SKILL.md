@@ -1,8 +1,7 @@
 ---
 name: mcp-setup
-description: 配置/新增/修改 MCP server（~/.workbuddy/mcp.json）时使用：按 provider 官方字段写 command/args/env/headers/url，合并 mcpServers 而不覆盖，写凭据，并提示用户在连接器管理里 Trust。
+description: 配置/新增/修改 MCP server（~/.workbuddy/mcp.json）：按 provider 官方字段写 command/args/env/headers/url，合并 mcpServers 而不覆盖，写凭据，并提示用户在连接器管理里 Trust。
 ---
-
 # MCP setup
 
 Config lives at `~/.workbuddy/mcp.json` — **not** `~/.workbuddy/.mcp.json`.

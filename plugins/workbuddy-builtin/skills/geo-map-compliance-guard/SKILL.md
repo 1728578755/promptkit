@@ -1,9 +1,7 @@
 ---
 name: geo-map-compliance-guard
-description: >
-  ALWAYS TRIGGER map compliance skill for any map generation, visualization, routing, or location service request to enforce strict China map data compliance rules, including approved data-source whitelist, key safety controls, territorial integrity requirements, privacy protection, and Tencent Maps GL JS scenario-based integration guidelines.
+description: ALWAYS trigger for map generation, visualization, routing or location services: enforce China map compliance — approved data sources only, territorial integrity, privacy protection, Tencent Maps GL JS integration rules.
 ---
-
 # Compliant Map Access
 
 For any need involving map rendering, visualization, marker placement, route drawing, or location services, the following compliance redlines are mandatory:

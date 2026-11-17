@@ -1,13 +1,12 @@
 ---
 name: workbuddy-smartsheet
 version: "0.1.3"
-description: 操作 WorkBuddy 智能表：列举 / 新建 / 重命名 / 删除智能表文档，管理子表、视图、记录、列、公告、评论与仪表盘，按规划文本一次建表建盘，并追加公式列、关联列与查找引用列。当用户提到智能表、多维表、数据表、建一张表、批量录数、加一列、改视图筛选排序、设置表公告或视图公告、评论、回复、@我、未解决、做仪表盘或统计图表，或给出一份 WorkBuddy 智能表文档时使用。工具名均以 `wb_smartsheet.` 开头，只作用于 WorkBuddy 智能表，不操作腾讯文档等其它文档产品的表格。
+description: 操作 WorkBuddy 智能表：列举/新建/重命名/删除文档，管理子表、视图、记录、列、公告、评论与仪表盘，按规划文本一次建表建盘。触发：智能表、多维表、数据表、建表、批量录数、加列、视图筛选排序、公告、评论、仪表盘。工具名以 wb_smartsheet. 开头，只作用于智能表。
 description_en: Operate WorkBuddy Smartsheet documents. Use to list, create, rename, or delete smartsheet documents; manage sub-tables, views, records, fields, announcements, comments, and dashboards; build a table or a dashboard in one call from a plan text; and append formula, link, and lookup columns. Use when the user mentions a smartsheet, multi-dimensional table, data table, creating a table, bulk data entry, adding a column, changing view filters or sorting, setting a table or view announcement, a comment, a reply, mentions, unresolved comments, or building a dashboard or chart. All tools are prefixed `wb_smartsheet.` and act only on WorkBuddy Smartsheet, never on tables in other document products such as Tencent Docs.
 license: Internal
 allowed-tools:
 disable: false
 ---
-
 # WorkBuddy 智能表
 
 ## 一、域声明：本工具集只操作 WorkBuddy 智能表（先读本节，再选工具）

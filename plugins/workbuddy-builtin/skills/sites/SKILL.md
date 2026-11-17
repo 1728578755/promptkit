@@ -1,12 +1,11 @@
 ---
 name: 发布为应用
-description: 将生成内容发布为在线链接，或取消发布已上线的应用；也负责为开发完成的微信小程序创建或复用应用卡以供预览（应用卡注册不等于发布）。适合网站、小游戏等交互式内容，支持任意可作为单端口 HTTP 服务运行的项目（静态站点 / PDF / Node.js / Python / Go）。当用户想把本地项目部署、发布、上线、发布小程序、生成分享链接、在云端预览或下线分享链接时使用。
+description: 把生成内容或本地项目发布为在线链接、下线已发布应用；为已开发的小程序创建/复用应用卡供预览（注册应用卡≠发布）。支持静态站点、PDF、Node/Python/Go 等单端口 HTTP 服务。触发：部署、发布、上线、发布小程序、分享链接、云端预览、下线。
 description_en: Publish generated content or a local project as an online link, unpublish an existing app, or create/reuse a WeChat mini-program application card for preview without releasing it. Use for websites, small games, static content, PDFs, mini programs, or any project that can run as a single-port HTTP service, including Node.js, Python, and Go applications.
 license: Internal
 allowed-tools:
 disable: false
 ---
-
 # 发布应用 / Sites
 
 Publish a local project as an online link via the built-in `workbuddy_sites_deploy` tool.

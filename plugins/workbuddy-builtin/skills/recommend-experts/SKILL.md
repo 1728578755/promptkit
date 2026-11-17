@@ -1,13 +1,11 @@
 ---
 name: recommend-experts
-description: |
-  When a task needs professional judgment, deep research, a specialist role, or multi-role collaboration and no Expert is selected in the current session, search for real Experts or Expert Teams and recommend them with an inline card.
+description: When a task needs professional judgment, deep research, a specialist role or multi-role collaboration and no Expert is selected, search real Experts/Teams and recommend them with an inline card.
 allowed-tools: search_plugins suggest_plugin_install
 license: Internal
 disable: false
 user-invocable: false
 ---
-
 # Recommend Experts
 
 Use this Skill only when a specialist role or multi-role workflow would clearly improve the current task and no Expert is selected in the current session.

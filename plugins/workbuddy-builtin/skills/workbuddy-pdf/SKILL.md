@@ -1,11 +1,10 @@
 ---
 name: workbuddy-pdf
-description: Read, summarize, search, and understand PDFs with the local workbuddy-pdf CLI. Use for PDF questions, text/table/image extraction, and checking scans, charts, or formulas against page images. Reading only — creating or editing PDF files is not supported.
+description: Read, summarize, search and understand PDFs with the local workbuddy-pdf CLI: text/table/image extraction, checking scans, charts and formulas against page images. Read-only — creating or editing PDFs is not supported.
 description_zh: 阅读理解 PDF，提取文字、表格和图片，结合原页图像核对结论；仅支持读取，不支持生成或编辑 PDF。
 description_en: Read and understand PDFs with the local workbuddy-pdf CLI, with page-image checks when needed. Reading only — creating or editing PDFs is not supported.
 version: "0.2.0"
 ---
-
 # PDF 阅读理解
 
 用 `workbuddy-pdf` 提取与问题相关的内容。提取结果可能遗漏文字或打乱顺序；重要结论应能定位到原 PDF。

@@ -1,8 +1,7 @@
 ---
 name: visualizer
-description: 把解释变成内联图表/示意图/交互组件（不是文件）：用 widget_guidelines 取设计规则、show_widget 渲染。当用户说「画一下/可视化/图表/示意图/讲解/对比/架构/流程/状态机」，或给出一个视觉产物的名词短语（如「REST vs GraphQL 对比表」「订单状态机」）时使用。
+description: 把解释变成内联图表/示意图/交互组件（渲染在对话里，不是文件）：widget_guidelines 取设计规则 → show_widget 渲染。触发：画一下、可视化、图表、示意图、讲解、对比、架构、流程、状态机，或视觉产物的名词短语。
 ---
-
 # Visualizer
 
 Renders diagrams, charts, mockups and interactive widgets inline — not files. `widget_guidelines` loads the design rules; `show_widget` streams the result into the conversation.

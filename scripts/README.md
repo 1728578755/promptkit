@@ -15,6 +15,8 @@ scripts\deploy.cmd -Skill team-orchestration
 ```
 
 `deploy.ps1` discovers installations, delegates to `apply.ps1`, asserts 7 built-in skills, then runs `verify.ps1`.
+`deploy.cmd` only pauses when it is started with no arguments (double-click); a scripted call such as
+`deploy.cmd -Target workbuddy` returns instead of waiting for a keypress.
 
 ### Installations are discovered, not configured
 
@@ -63,18 +65,28 @@ scripts\restore.ps1 -BackupPath backups\<timestamp>
 
 Backup sets are filtered by the `target` recorded in their manifest; older sets without the field show as `legacy`.
 
-## Render / check
+## Render / check / cache
 
 ```bash
 npm install
 npm run render                                  # 3 templates × 5 modes into dist/
-npm run check                                   # structural assertions
-node scripts/render-check.js --profile cn       # CN context
-node scripts/render-check.js --profile ai       # international-edition context
+npm run check                                   # structural assertions on dist/
+npm run render-check -- --profile cn            # render all 15 combinations, CN context
+npm run render-check -- --profile ai            # international-edition context
+npm run render-check -- --root <dir>            # render from another root (e.g. a plugin-cache snapshot)
+npm run cache                                   # longest common prefix per change scenario
+npm run cache -- --strict                       # fail when a same-mode scenario drops below 95%
+npm run check-memory                            # <memory_system>/<memory_paths> across the four switches
 ```
 
 `render-check.js` also asserts: no leftover `{{`/`{%`, no `<regional_conventions>` under the AI profile,
 and no `<content_policy>` in any mode.
+
+`cache-prefix.js` renders two versions of the same prompt that differ in exactly one variable (project
+folder, account memory path, model name, working memory, user memory, industry mode) and reports the
+longest common prefix as a percentage — that is literally the share of the request the prefix cache can
+reuse. Cross-mode switches are reported but not gated by default (ask keeps far fewer blocks than craft);
+turn the gate on with `--mode-threshold N`.
 
 ## Files
 
@@ -86,4 +98,6 @@ and no `<content_policy>` in any mode.
 - `restore.ps1` — restore a previous backup, per target.
 - `render.js` — Nunjucks render of all 15 template/mode combinations (release layout).
 - `check.js` — structural assertions on the renders.
-- `render-check.js` — same render from the project layout, with edition profiles.
+- `render-check.js` — same render from the project layout, with edition profiles; `--root` renders any layout.
+- `cache-prefix.js` — prefix-cache retention per change scenario (LCP), optional `--strict` gate.
+- `check-memory-blocks.js` — memory-block shape for the four `CloudMemoryPlatformEnabled` × `WorkspaceMemoryDisabled` combinations.

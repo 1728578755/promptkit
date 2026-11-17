@@ -1,13 +1,12 @@
 ---
 name: wecom-forwarded-chat-resources
-description: Fetch the online resources listed in a WeCom forwarded-chat archive. Load this Skill whenever the host injects a `<wecom_forwarded_chat_online_resources>` block, or whenever a WeCom / WeChat forwarded-chat transcript contains `[文档]` `[微盘文件]` `[日程]` `[待办]` `[会议]` `[智能纪要]` entries carrying an id. It owns the resource-type routing, the host-managed WeCom authorization wait, and the per-entry fetch accounting. It does not summarize the chat itself.
+description: 取回企微转发聊天里的在线资源：host 注入 <wecom_forwarded_chat_online_resources>，或聊天里带 id 的 [文档][微盘文件][日程][待办][会议][智能纪要] 条目。负责资源类型路由、授权等待与逐条取回记账，不总结聊天本身。
 description_en: Fetch the online resources listed in a WeCom forwarded-chat archive. Load this Skill whenever the host injects a <wecom_forwarded_chat_online_resources> block, or whenever a WeCom / WeChat forwarded-chat transcript contains document, WeDrive file, calendar, todo, meeting, or meeting-minutes entries carrying an id. It owns the resource-type routing, the host-managed WeCom authorization wait, and the per-entry fetch accounting. It does not summarize the chat itself.
 author: WorkBuddy
 version: "0.1.0"
 disable-model-invocation: true
 user-invocable: false
 ---
-
 # WeCom forwarded-chat online resources
 
 A WeCom forwarded-chat archive mixes two kinds of payload:

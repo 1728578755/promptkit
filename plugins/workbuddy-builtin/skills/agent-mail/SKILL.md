@@ -2,7 +2,6 @@
 name: agent-mail
 description: 收发/查看/搜索邮件、写草稿、抄送、处理邮件附件时使用；email/inbox/reply 触发；邮件工具是 deferred 的，先 ToolSearch 再 DeferExecuteTool。
 ---
-
 # Agent Mail
 
 The mail tools are deferred: run `ToolSearch` for `mcp__agent-mail__` and invoke the result with `DeferExecuteTool`.

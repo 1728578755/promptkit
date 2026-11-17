@@ -1,6 +1,6 @@
 ---
 name: library
-description: "Route here (资料库/知识库/网盘/空间) when users create, generate, beautify, upload, edit, share, organize (整理/归档/理一理), publish, download, export (导出/下载), search or retrieve HTML pages (工作台/看板/收集表/汇报页), docs (文档/周报/笔记), tables/CSV, drive files, web links(剪藏/回读), images, attachments or audio transcripts."
+description: 资料库/知识库/网盘/空间统一入口：创建、生成、美化、上传、编辑、分享、整理归档、发布、下载导出、检索 HTML 页面（工作台/看板/收集表/汇报页）、文档、表格 CSV、网盘文件、网页剪藏、图片、附件、录音转写。
 description_en: "library/knowledge base/cloud drive/spaces: create, generate, beautify, upload, edit, share, organize, publish, download/export, search/retrieve HTML pages workbench/dashboard/collection form/report page, docs, tables/CSV, drive files, web links clip/read back, images, attachments, audio transcripts."
 version: 0.6.1
 author: csig-x2
@@ -11,7 +11,6 @@ metadata:
     data_classification: L2
     lifecycle: draft
 ---
-
 # Library Skill
 
 Library is WorkBuddy's native content workspace: every user has one personal space (`category=personal`) plus any number of team spaces (`category=team`), each space — identified by `spaceId` — holding documents, structured tables, report pages, web clips, drive files, and attachments that you read, write, organize, search, or share. Inside a space, content is a tree of nodes (`nodeId`; a node can hold child nodes), and a node's kind (`doc`, `database`, `web`/`page`, `link`, `drive`, `smh`, or folder) picks the entry file to read next. All structured data goes into native library tables, never MySQL or any external database.

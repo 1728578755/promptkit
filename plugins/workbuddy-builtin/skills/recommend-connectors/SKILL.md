@@ -1,13 +1,11 @@
 ---
 name: recommend-connectors
-description: |
-  When a user task requires an external app, service, API, MCP server, authorization, or third-party data and no connected tool covers it, search for real Connectors and recommend them with an inline card.
+description: When a task needs an external app, service, API, MCP server or third-party data that no connected tool covers, search real Connectors and recommend them with an inline card.
 allowed-tools: search_plugins suggest_plugin_install
 license: Internal
 disable: false
 user-invocable: false
 ---
-
 # Recommend Connectors
 
 Use this Skill only when the current task directly requires an external service, authorization, or the user's third-party data and the available tools cannot complete it.

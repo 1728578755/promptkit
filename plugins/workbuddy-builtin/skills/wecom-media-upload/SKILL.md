@@ -1,14 +1,12 @@
 ---
 name: wecom-media-upload
-description: >
-  通过 A2ASendMessage 给企业微信聊天 Agent 发送本地文件（文件/图片/语音/视频）前，必须先用本 Skill 上传到企业微信 third_aibot 媒体库，再把上传返回的 media_url 放进 attachments，作为独立的文件 part 与文本一起发送。
+description: 给企微聊天 Agent 发送本地文件（文件/图片/语音/视频）前，必须先用本 Skill 上传到 third_aibot 媒体库，再把返回的 media_url 放进 attachments，作为独立文件 part 与文本一起发送。
 user-invocable: false
 disable-model-invocation: false
 metadata:
   scope: workspace
   integration: workbuddy-wecom-media
 ---
-
 # 企业微信媒体上传（给企业微信聊天 Agent 发本地文件的前置流程）
 
 当你准备通过 `A2ASendMessage` 向企业微信聊天 Agent 发送**本地文件**（文件 / 图片 / 语音 / 视频）时，

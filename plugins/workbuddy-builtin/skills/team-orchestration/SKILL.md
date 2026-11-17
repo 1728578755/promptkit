@@ -2,7 +2,6 @@
 name: team-orchestration
 description: 复杂任务要多角色并行、拆给多个 agent、或要实时查看/管理团队状态时使用；走团队面板 TeamCreate → SendMessage → TeamDelete，而不是零散子代理。
 ---
-
 # Team orchestration (团队面板)
 
 The team panel is the default for parallel or multi-role work: every teammate stays visible and controllable.

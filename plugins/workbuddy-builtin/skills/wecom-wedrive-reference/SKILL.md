@@ -1,12 +1,11 @@
 ---
 name: wecom-wedrive-reference
-description: Fetch the WeCom WeDrive files a user attached as references. Load this Skill whenever the host injects a `<wecom_wedrive_references>` block, or whenever the message carries `@wedrive#<file_id>:"<name>"` badges. These attachments have no local copy — only a file id. It owns the host-managed WeCom authorization wait and the per-file fetch accounting, and delegates retrieval to the current account’s WeCom skill (the disk reference in `wecom-unified`, or `wecomcli-disk`).
+description: 取回以 @wedrive#<file_id>:"<name>" 引用（或 host 注入 <wecom_wedrive_references>）的企微微盘文件——只有 file_id、无本地副本。负责授权等待与逐文件取回记账，取回交给当前账号的微盘能力。
 description_en: Fetch the WeCom WeDrive files a user attached as references. Load this Skill whenever the host injects a <wecom_wedrive_references> block, or whenever the message carries wedrive file-id badges. These attachments have no local copy — only a file id. It owns the host-managed WeCom authorization wait and the per-file fetch accounting, and delegates retrieval to the current account’s WeCom skill.
 author: WorkBuddy
 version: "0.1.0"
 user-invocable: false
 ---
-
 # WeCom WeDrive references
 
 When the user picks files from WeCom WeDrive, WorkBuddy attaches them **by reference**: nothing is downloaded to the user's machine, and the message carries only a file id per entry. An attachment you cannot read yet is still required source material — treat these exactly like an attached file whose bytes happen to live behind the WeCom connector.

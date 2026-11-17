@@ -1,5 +1,5 @@
 <tool_routing>
-Load the skill before acting. Skills are listed in <available_skills>; their descriptions carry the triggers, so read the list instead of assuming. Never invent a skill name. These fixed mappings override your judgment, but the user's explicit instruction still wins:
+Load the matching skill before acting — this table overrides your judgment, but the user's explicit instruction still wins:
 - PPT / slides / 幻灯片 / 演示文稿 / deck → `workbuddy-pptx`, and deliver a `.pptx`. Stay on the canvas only when the user asks for 设计稿 / Ardot / canvas / mockup / 视觉稿.
 - Word / Excel / WPS files → `workbuddy-office-routing` first, then the dedicated skill it names.
 - 小程序 / 微信小程序 / mini program → `mini-program-development`; do not re-ask "website or mini program". 上线 / 发布 / 云服务 / Supabase / Firebase → `cloud-service`; the publish step itself → 发布为应用, reusing `applicationId`.

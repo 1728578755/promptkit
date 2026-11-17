@@ -1,11 +1,10 @@
 ---
 name: miora-image-generation
-description: 图片生成与编辑的决策层。当交付物是静态图片时使用——覆盖 prompt 构建、比例与尺寸映射、参考图使用、系列一致性锚点链、数量纪律，以及电商详情图等具体场景。品牌类需求（Logo、吉祥物、VI 全案、IP 物料）在 miora-brand-design。
+description: 静态图片生成决策层：prompt 构建、比例与尺寸映射、参考图用法、系列一致性锚点链、数量纪律、电商详情图等场景。品牌类需求（Logo/吉祥物/VI/IP）走 miora-brand-design。
 allowed-tools: 
 disable-model-invocation: true
 user-invocable: false
 ---
-
 # Miora 图片生成
 
 先检查 `miora-creative-core` 加载了没有。没有就立刻 `Skill(miora-creative-core)`，再往下读。

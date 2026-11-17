@@ -1,12 +1,9 @@
 ---
 name: expert-manager
-description: |
-  专家包的全生命周期运营：转化(从开源仓库/本地项目创建专家包)、修改已有专家、合规检查、批量更新、质量审查。
-  触发词：创建专家、转化专家、转成专家、生成专家包、导入专家、convert expert、修改专家、编辑专家、更新专家、modify expert、检查专家、审查专家包、专家合规、专家运营、expert ops。
+description: 专家包全生命周期：从开源仓库或本地项目转化专家包、修改已有专家、合规检查、批量更新、质量审查。触发：创建/转化/生成专家包、导入专家、修改专家、审查专家包、专家合规、expert ops。
 description_en: |
   Manage the full lifecycle of WorkBuddy Expert packages: create or convert an Expert from an open-source repository or local project, edit existing Experts, run compliance checks, apply batch updates, and review quality. Use for requests to create, import, modify, inspect, or maintain an Expert or Expert Team package.
 ---
-
 # WorkBuddy 专家包管理器
 
 > ⚠️ **执行前必读**：当需要使用本 skill 时，你必须先从头到尾完整阅读本 SKILL.md 全文并严格遵守（包括所有规则、流程、References 列表），然后再开始执行任务。禁止跳读或仅凭部分段落就开始行动。

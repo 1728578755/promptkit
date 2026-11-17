@@ -1,8 +1,6 @@
 ---
 name: marketplace-skill-installer
-description: |
-  在 WorkBuddy 对话中通过一句话搜索并安装 Skill。
-  触发词：安装 skill、安装技能、install skill、添加技能、装个 X 技能、帮我安装 X、search skill。
+description: 在 WorkBuddy 对话中通过一句话搜索并安装 Skill。触发词：安装 skill、安装技能、install skill、添加技能、装个 X 技能、帮我安装 X、search skill。
 description_en: |
   Search for and install skills through natural-language requests. Use when the user asks to find, add, or install a skill.
 allowed-tools: search_and_install_skills
@@ -10,7 +8,6 @@ license: Internal
 disable: false
 user-invocable: false
 ---
-
 # Marketplace Skill Installer
 
 使用 `search_and_install_skills` 搜索并安装技能。

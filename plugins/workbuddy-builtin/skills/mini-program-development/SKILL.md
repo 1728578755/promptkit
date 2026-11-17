@@ -1,12 +1,11 @@
 ---
 name: mini-program-development
-description: 在 WorkBuddy 内创建、修改、预览和托管发布微信小程序。适用于静态小程序，或需要数据库、登录、文件、LLM 等云服务的小程序；发布、上线、小程序码和小程序代码问题也使用此 Skill；需要微信开发者工具编译、模拟器、真机预览或真机调试时同样使用。
+description: 在 WorkBuddy 内创建、修改、预览、托管发布微信小程序：静态小程序或需要数据库/登录/文件/LLM 的云服务小程序；发布上线、小程序码、代码问题、开发者工具编译、模拟器、真机预览与调试也走这里。
 description_en: Develop, preview, validate, and publish WeChat mini programs inside WorkBuddy. Use for static or cloud-enabled mini programs, publishing, release, QR-code, and mini-program code issues, and when WeChat DevTools compilation, simulator, real-device preview or debugging is needed.
 license: Internal
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Skill, ToolSearch, DeferExecuteTool, AskUserQuestion, workbuddy_miniprogram_scaffold, workbuddy_cloud_service, workbuddy_sites_deploy, workbuddy_sites_unpublish
 disable: false
 ---
-
 # WorkBuddy 小程序开发
 
 本 Skill 负责 WorkBuddy 内的小程序开发闭环：生成原生工程、预览、代码方法论、微信开发者工具的编译与真机调试、发布前预检和托管发布指引。
