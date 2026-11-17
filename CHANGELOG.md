@@ -2,6 +2,36 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.1.4 — 2026-11-17
+
+主题：**只从系统登记的信息取安装位置，不再扫盘。**
+
+### 发现来源收敛为五路
+
+| 优先级 | 来源 |
+|---|---|
+| 1 显式 | `-WorkBuddyPath` / `-ConfigDir`、`targets.json` 的 `installPath` / `configDir` |
+| 2 已安装程序 | 卸载登记项：`DisplayIcon` → exe 所在目录、`UninstallString` → 卸载器所在目录、`InstallLocation`；64/32 位视图、HKLM 与 HKCU |
+| 3 App Paths | 安装器登记的可执行文件路径，遍历整棵子树，`WorkBuddy*.exe` 都算 |
+| 4 数据目录配对 | `<数据目录>\.skill-list-cache.json` 的 `scopeKey` 反查；`settings.json` 兜底 |
+| 5 运行中的进程 | 进程名匹配 `WorkBuddy*` 的 exe 实际目录 |
+
+- 删除：`PATH` 查找、开始菜单快捷方式递归、`LocalAppData` / `scoop` / 盘根等目录枚举、整盘扫描（`Find-InstallByScan`）。
+- 五路都落空时不再猜目录：直接报错并列出已登记的安装，提示 `-WorkBuddyPath` 或写进 `targets.json`；
+  显式给了 `-WorkBuddyPath` 时会为这个未注册的安装建一个临时目标（`custom`），不必先登记。
+- 本机两套安装的 `InstallLocation` 都是空的，靠 `DisplayIcon`（`...\WorkBuddy.exe,0`）解析出目录，已实测可用。
+
+### 修复
+
+- 进程枚举改为先按进程名筛再读 `Path`：此前对全部进程读 `Path`，冷启动 `-ListTargets` 要 16.8 s，现在 0.9 s。
+- 顶层目标解析失败时打印一行错误并以退出码 1 结束，不再抛裸异常栈。
+
+### 实测
+
+- `-ListTargets` 0.92 s；`-DryRun` / `-Verify` 两目标通过。
+- 负面验证：盘根放一个只有 `WorkBuddyScanTest.exe` 的假目录，`-ListTargets` 不收录、显式 `-Target` 报"未登记"并给出指定方法。
+- 正面验证：给该假目录传 `-WorkBuddyPath` + `-ConfigDir`，能正常当作 `custom` 目标预演。
+
 ## v1.1.3 — 2026-11-17
 
 主题：**安装目录不再假定在 `Program Files`。**

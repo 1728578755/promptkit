@@ -417,7 +417,8 @@ function Invoke-AsarTarget($profile, [string]$mode) {
 
 # --- list ---
 if ($action -eq "list") {
-    $profiles = @(Resolve-TargetProfiles -Names $Target -ScriptRoot $ScriptRoot)
+    try { $profiles = @(Resolve-TargetProfiles -Names $Target -ScriptRoot $ScriptRoot -InstallOverride $WorkBuddyPath -ConfigOverride $ConfigDir) }
+    catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }
     Write-Host "== Targets ==" -ForegroundColor Cyan
     foreach ($p in $profiles) {
         Write-Host ("* {0,-14} {1}" -f $p.Name, $p.Label)
@@ -430,7 +431,8 @@ if ($action -eq "list") {
 }
 
 # --- resolve the target list once, then run the same action for every install ---
-$profiles = @(Resolve-TargetProfiles -Names $Target -ScriptRoot $ScriptRoot)
+try { $profiles = @(Resolve-TargetProfiles -Names $Target -ScriptRoot $ScriptRoot -InstallOverride $WorkBuddyPath -ConfigOverride $ConfigDir) }
+catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }
 Write-Host ("== {0}: {1} target(s): {2} ==" -f $action, $profiles.Count, (($profiles | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Cyan
 if ($action -eq "deploy") {
     Assert-SkillSources

@@ -1,15 +1,17 @@
 ﻿# Shared target resolver for WorkBuddy / WorkBuddy AI installations.
 # Dot-source this file: . "$PSScriptRoot\target.ps1"
 #
-# Nothing about install paths is hard-coded. A target is resolved from, in order:
+# Nothing about install paths is hard-coded, and nothing is found by walking the disk.
+# A target is resolved from, in order:
 #   explicit -WorkBuddyPath / -ConfigDir
 #   targets.json pins
 #   PROMPTKIT_TARGET_<ID>_INSTALL / _CONFIG  (set by deploy.ps1 for child scripts)
-#   discovery: data-dir pairing, App Paths, uninstall registry, running processes,
-#              PATH, Start Menu shortcuts, user install dirs, then a drive scan
-#   data side : %USERPROFILE%\.workbuddy*  (and WORKBUDDY_CONFIG_DIR)
-#   pairing   : <data>\.skill-list-cache.json -> scopeKey entry
-#               "...\<install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills"
+#   the installed-app registration: uninstall entries (DisplayIcon / UninstallString /
+#     InstallLocation) and App Paths, both 64- and 32-bit views, HKLM and HKCU
+#   data-dir pairing: <data>\.skill-list-cache.json -> scopeKey entry
+#     "...\<install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills"
+#   the executable of a running process (the path the app is actually running from)
+# If none of these knows the folder, there is no guessing: pass -WorkBuddyPath.
 # scripts\targets.json only carries optional overrides (pin a path, overlay, label).
 
 # 父进程（deploy.ps1）把解析结果通过环境变量传给子脚本，子进程就不必再扫一遍盘。
@@ -81,8 +83,11 @@ function Get-InstallCandidates {
     $candidates = New-Object System.Collections.Generic.List[string]
     $add = { param($p) if ($p) { $candidates.Add([string]$p) } }
 
-    # 安装位置不写死：任何盘、任何目录名都要能找到。下面每一路都是"线索"，最后统一用
-    # Test-TargetInstallRoot（resources\app.asar* 或 WorkBuddy*.exe）验证真假。
+    # 只认"系统里登记过的安装"，不扫盘、不猜目录：
+    #   1) 已安装程序（卸载登记项）：DisplayIcon / UninstallString / InstallLocation
+    #   2) App Paths：安装器登记的可执行文件路径
+    #   3) 正在运行的进程：exe 实际所在目录
+    # 每一路都只是线索，最后统一用 Test-TargetInstallRoot 验证（resources\app.asar* 或 WorkBuddy*.exe）。
 
     # 1) App Paths —— 遍历整棵子树，只按 exe 名通配，不写死 WorkBuddy.exe / WorkBuddyAI.exe
     foreach ($base in @(
@@ -133,60 +138,16 @@ function Get-InstallCandidates {
         } catch { }
     }
 
-    # 3) 正在运行的进程 —— 名字或可执行文件路径任一命中
+    # 3) 正在运行的进程 —— 先按进程名筛（便宜），只对命中项读 Path（读全部进程的 Path 会慢到十几秒）
     try {
-        Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-                $p = $_.Path
-                if ($p -and (([IO.Path]::GetFileName($p) -like "WorkBuddy*.exe") -or ($_.ProcessName -like "WorkBuddy*"))) {
-                    & $add (Split-Path $p -Parent)
-                }
-            } catch { }
-        }
+        Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProcessName -like "WorkBuddy*" } |
+            ForEach-Object {
+                try {
+                    if ($_.Path) { & $add (Split-Path $_.Path -Parent) }
+                } catch { }
+            }
     } catch { }
-
-    # 4) PATH 里的 WorkBuddy*.exe
-    try {
-        Get-Command -Name "WorkBuddy*.exe" -CommandType Application -ErrorAction SilentlyContinue |
-            ForEach-Object { if ($_.Source) { & $add (Split-Path $_.Source -Parent) } }
-    } catch { }
-
-    # 5) 开始菜单快捷方式（用户级 + 全局）
-    try {
-        $shell = New-Object -ComObject WScript.Shell
-        foreach ($dir in @(
-            (Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs"),
-            (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs")
-        )) {
-            if (-not $dir -or -not [IO.Directory]::Exists($dir)) { continue }
-            try {
-                Get-ChildItem -LiteralPath $dir -Filter "WorkBuddy*.lnk" -Recurse -Depth 2 -ErrorAction SilentlyContinue |
-                    ForEach-Object {
-                        try {
-                            $target = $shell.CreateShortcut($_.FullName).TargetPath
-                            if ($target) { & $add (Split-Path $target -Parent) }
-                        } catch { }
-                    }
-            } catch { }
-        }
-    } catch { }
-
-    # 6) 用户级安装位置（scoop / 便携版 / LocalAppData\Programs 等）
-    foreach ($base in @(
-        (Join-Path $env:LOCALAPPDATA "Programs"),
-        (Join-Path $env:LOCALAPPDATA "Apps"),
-        $env:LOCALAPPDATA,
-        (Join-Path $env:APPDATA "Programs"),
-        (Join-Path $env:USERPROFILE "Apps"),
-        (Join-Path $env:USERPROFILE "scoop\apps"),
-        $env:ProgramData
-    )) {
-        if (-not $base -or -not [IO.Directory]::Exists($base)) { continue }
-        try {
-            Get-ChildItem -LiteralPath $base -Directory -Filter "WorkBuddy*" -ErrorAction SilentlyContinue |
-                ForEach-Object { & $add $_.FullName }
-        } catch { }
-    }
 
     $seen = @{}
     $result = @()
@@ -202,45 +163,6 @@ function Get-InstallCandidates {
     }
     $script:InstallCandidatesCache = $result
     return $result
-}
-# 兜底：真的找不到时才扫盘。只在配置/注册表/配对都失败时调用，避免每次运行都付这份成本。
-# 覆盖 <盘>:\WorkBuddy*、<盘>:\*\WorkBuddy*、<盘>:\Program Files*\WorkBuddy*——不假定安装目录在 Program Files。
-function Find-InstallByScan {
-    if ($null -ne $script:InstallScanCache) { return $script:InstallScanCache }
-    $found = New-Object System.Collections.Generic.List[string]
-    $drives = @()
-    try {
-        $drives = @([IO.DriveInfo]::GetDrives() |
-            Where-Object { $_.IsReady -and $_.DriveType -eq [IO.DriveType]::Fixed } |
-            ForEach-Object { $_.RootDirectory.FullName })
-    } catch { }
-    foreach ($drive in $drives) {
-        foreach ($pf in @("Program Files", "Program Files (x86)")) {
-            $base = Join-Path $drive $pf
-            if (-not [IO.Directory]::Exists($base)) { continue }
-            try {
-                Get-ChildItem -LiteralPath $base -Directory -Filter "WorkBuddy*" -ErrorAction SilentlyContinue |
-                    ForEach-Object { $found.Add($_.FullName) }
-            } catch { }
-        }
-        try {
-            Get-ChildItem -LiteralPath $drive -Directory -Filter "WorkBuddy*" -ErrorAction SilentlyContinue |
-                ForEach-Object { $found.Add($_.FullName) }
-        } catch { }
-        try {
-            Get-ChildItem -LiteralPath $drive -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notmatch '^(Windows|ProgramData|Program Files.*|Users|\$Recycle\.Bin|System Volume Information|Recovery|PerfLogs)$' } |
-                ForEach-Object {
-                    $level1 = $_.FullName
-                    try {
-                        Get-ChildItem -LiteralPath $level1 -Directory -Filter "WorkBuddy*" -ErrorAction SilentlyContinue |
-                            ForEach-Object { $found.Add($_.FullName) }
-                    } catch { }
-                }
-        } catch { }
-    }
-    $script:InstallScanCache = @($found | Select-Object -Unique)
-    return $script:InstallScanCache
 }
 
 
@@ -369,24 +291,25 @@ function Resolve-TargetProfile {
 
     $conf = $configured | Where-Object { $_.Name -eq $name2 } | Select-Object -First 1
     $disc = $discovered | Where-Object { $_.Id -eq $name2 } | Select-Object -First 1
-    if (-not $conf -and -not $disc -and $Name) {
-        # 显式点名但配置/配对都没命中：给扫盘一次机会（安装目录可以在任何盘、任何目录名）
-        foreach ($cand in @(Find-InstallByScan)) {
-            if (-not (Test-TargetInstallRoot $cand "")) { continue }
-            if ((Get-TargetId $cand (Get-ProductExe $cand)) -ne $name2) { continue }
+    if (-not $conf -and -not $disc) {
+        # 显式给了路径就按它建一个临时目标（便携版 / 未注册的安装），不再猜目录
+        $explicitInstall = if ($InstallOverride) { Expand-TargetToken $InstallOverride } else { "" }
+        $explicitConfig = if ($ConfigDirOverride) { Expand-TargetToken $ConfigDirOverride } else { "" }
+        if ($explicitInstall -or $explicitConfig) {
             $disc = [pscustomobject]@{
                 Id = $name2
-                Label = (Split-Path -Leaf $cand)
-                InstallPath = $cand
-                ExeName = (Get-ProductExe $cand)
-                ConfigDir = (Get-DefaultConfigDir -InstallPath $cand -Id $name2)
+                Label = if ($explicitInstall) { Split-Path -Leaf $explicitInstall } else { $name2 }
+                InstallPath = $explicitInstall
+                ExeName = if ($explicitInstall) { Get-ProductExe $explicitInstall } else { "" }
+                ConfigDir = $explicitConfig
             }
-            break
         }
     }
     if (-not $conf -and -not $disc) {
         $ids = (@($discovered | ForEach-Object { $_.Id }) + @($configured | ForEach-Object { $_.Name }) | Select-Object -Unique) -join ', '
-        throw "Unknown target '$name2'. Detected: $ids"
+        throw ("Unknown target '$name2'. Registered installations: $ids. " +
+               "If this copy was installed without registering (portable build), pass -WorkBuddyPath '<folder containing WorkBuddy*.exe>', " +
+               "or pin it once in scripts\targets.json.")
     }
 
     $c = if ($conf) { $conf.Value } else { $null }
@@ -402,13 +325,6 @@ function Resolve-TargetProfile {
                else { "" }
     if ($install -and -not (Test-TargetInstallRoot $install $exeName)) { $install = "" }
     if (-not $install -and $disc) { $install = $disc.InstallPath; if (-not $exeName -and $disc.ExeName) { $exeName = $disc.ExeName } }
-    # 最后一路：扫盘。只有前面全部落空才付这份成本，安装目录叫什么、在哪个盘都行。
-    if (-not $install) {
-        foreach ($cand in @(Find-InstallByScan)) {
-            if (-not (Test-TargetInstallRoot $cand "")) { continue }
-            if ((Get-TargetId $cand (Get-ProductExe $cand)) -eq $name2) { $install = $cand; break }
-        }
-    }
     if ($install -and -not $exeName) { $exeName = Get-ProductExe $install }
 
     $configDir = if ($ConfigDirOverride) { Expand-TargetToken $ConfigDirOverride }
@@ -457,11 +373,18 @@ function Get-TargetNames([string]$ScriptRoot = $PSScriptRoot) {
 function Resolve-TargetProfiles {
     param(
         [string]$Names = "all",
-        [string]$ScriptRoot = $PSScriptRoot
+        [string]$ScriptRoot = $PSScriptRoot,
+        [string]$InstallOverride = "",
+        [string]$ConfigOverride = ""
     )
 
     $list = @()
     $wantsAll = (-not $Names) -or $Names -eq "all" -or $Names -eq "*"
+    # 显式给了路径却没有点名目标：按"custom"这一套处理，而不是把路径套到所有安装上
+    if ($wantsAll -and ($InstallOverride -or $ConfigOverride)) {
+        $Names = "custom"
+        $wantsAll = $false
+    }
     if ($wantsAll) {
         foreach ($id in @(Get-TargetNames $ScriptRoot)) {
             try {
@@ -477,7 +400,7 @@ function Resolve-TargetProfiles {
     }
 
     foreach ($id in ($Names -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
-        $list += (Resolve-TargetProfile -Name $id -ScriptRoot $ScriptRoot)
+        $list += (Resolve-TargetProfile -Name $id -ScriptRoot $ScriptRoot -InstallOverride $InstallOverride -ConfigDirOverride $ConfigOverride)
     }
     return @($list)
 }

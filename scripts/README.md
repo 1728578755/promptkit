@@ -39,17 +39,19 @@ with one summary table and a non-zero exit code if any target failed.
 
 ### Installations are discovered, not configured
 
-`scripts\targets.json` ships with empty paths and no default target. **The install folder is not assumed to be
-under `Program Files`** — resolution tries, in order:
+`scripts\targets.json` ships with empty paths and no default target. **Only installations that the system knows
+about are used — the disk is never walked and folders are never guessed.** Resolution order:
 
 | order | source |
 |---|---|
 | 1 explicit | `-WorkBuddyPath` / `-ConfigDir`, or `installPath` / `configDir` in `targets.json` |
-| 2 pairing (best) | `<data>\.skill-list-cache.json` → `scopeKey` entry `...\<install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills`; falls back to `settings.json` |
-| 3 registry | `App Paths` (whole subtree, any `WorkBuddy*.exe`), uninstall entries (DisplayName / Publisher / InstallLocation) |
-| 4 runtime traces | running processes, `PATH`, Start Menu shortcuts (machine + user) |
-| 5 common places | `%LOCALAPPDATA%\Programs`, `%APPDATA%`, `scoop\apps`, `%ProgramData%`, `<drive>:\Program Files*\WorkBuddy*`, the drive root and one level below it |
-| 6 drive scan | only when 1–5 fail and `-Target` was named explicitly: `<drive>:\WorkBuddy*`, `<drive>:\*\WorkBuddy*`, `<drive>:\Program Files*\WorkBuddy*` |
+| 2 installed programs | uninstall entries: `DisplayIcon` → folder of the exe, `UninstallString` → folder of the uninstaller, `InstallLocation`; 64- and 32-bit views, HKLM and HKCU |
+| 3 App Paths | executable paths registered by the installer, whole subtree, any `WorkBuddy*.exe` |
+| 4 data-dir pairing | `<data>\.skill-list-cache.json` → `scopeKey` entry `...\<install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills`; falls back to `settings.json` |
+| 5 running process | the executable path of a process named `WorkBuddy*` |
+
+When none of the five knows the folder the command fails with the list of registered installations instead of
+scanning; an unregistered portable copy is pinned once with `-WorkBuddyPath "<dir>"` or in `targets.json`.
 
 The executable is matched as `WorkBuddy*.exe` (so `WorkBuddy.exe`, `WorkBuddyAI.exe`, `WorkBuddy Beta.exe` all work);
 the folder name can be anything as long as it holds `resources\app.asar` or a matching exe.
