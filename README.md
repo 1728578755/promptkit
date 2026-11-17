@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.1.0**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.1.1**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -115,16 +115,31 @@ npm run check         # 结构断言：无模板残留、关键段落、模式�
 
 `npm run render-check` 在渲染之外还断言：没有残留 `{{` / `{%`、国际版上下文下没有 `<regional_conventions>`、任何模式都没有 `<content_policy>`。
 
-## 一键部署（Windows）
+## 一键部署与恢复（Windows）
+
+**只有一个入口** `scripts\deploy.cmd`，部署、恢复、校验、快照、`app.asar` 都是它的动作：
 
 ```bat
-scripts\deploy.cmd -ListTargets                    :: 自动发现所有已安装运行时
-scripts\deploy.cmd -Target workbuddy-ai
-scripts\deploy.cmd -Target workbuddy-ai -Elevate   :: 连安装镜像一起写（UAC）
-scripts\deploy.cmd -Target workbuddy-ai -DryRun
+scripts\deploy.cmd                        :: 部署到所有已发现的安装（CN + AI 一起改）
+scripts\deploy.cmd -Elevate               :: 同上，先弹一次 UAC，再写两侧安装镜像
+scripts\deploy.cmd -Target workbuddy-ai   :: 只改一套（默认 all）
+scripts\deploy.cmd -ListTargets           :: 列出发现的安装与数据目录
+scripts\deploy.cmd -DryRun                :: 预演，不写文件
 scripts\deploy.cmd -Template welcome-mode\work.tpl
 scripts\deploy.cmd -Skill team-orchestration
+
+scripts\deploy.cmd -Restore               :: 每个目标恢复到最近一次备份
+scripts\deploy.cmd -Restore -List         :: 列出每个目标的备份集
+scripts\deploy.cmd -Restore -BackupPath backups\<timestamp>
+scripts\deploy.cmd -Restore -Original     :: 恢复原始基线
+
+scripts\deploy.cmd -Verify                :: 每个目标的一致性校验（含 include 解析）
+scripts\deploy.cmd -Pull                  :: 每个目标快照到 archive\pulls\
+scripts\deploy.cmd -Asar                  :: 关掉应用后：提权 → 打 app.asar 补丁 → 重启
+scripts\deploy.cmd -AsarRestore           :: 还原 app.asar
 ```
+
+一次运行会把**所有发现的安装**都改掉，不需要为每个安装各跑一次。
 
 **不依赖任何写死的目录**。`scripts\targets.json` 出厂路径为空，安装点由 `scripts\target.ps1` 现场发现：
 
@@ -134,7 +149,7 @@ scripts\deploy.cmd -Skill team-orchestration
 | 数据 | `%USERPROFILE%\.workbuddy*`、`WORKBUDDY_CONFIG_DIR` |
 | 配对 | `<数据目录>\.skill-list-cache.json` 的 `scopeKey` 里那条 `...\<安装目录>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills` |
 
-目标 id 由安装目录名推导（`WorkBuddy` → `workbuddy`，`WorkBuddyAI` → `workbuddy-ai`）。只有需要钉死某个路径时，才在 `targets.json` 里填 `installPath` / `configDir`。
+目标 id 由安装目录名推导（`WorkBuddy` → `workbuddy`，`WorkBuddyAI` → `workbuddy-ai`）；数据目录先按上面的配对反查，配不上才退回 `%USERPROFILE%\.<id>`。只有需要钉死某个路径时，才在 `targets.json` 里填 `installPath` / `configDir`。
 
 ### 提示词与技能是两个读取点
 
@@ -143,11 +158,12 @@ scripts\deploy.cmd -Skill team-orchestration
 | 模板、片段、交互模式文本 | `<数据目录>\plugins\cache\workbuddy-builtin\<插件>\<版本>\` | 任意 deploy，**不需要管理员** |
 | 内置技能 `SKILL.md` | `<安装目录>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills\`（用户技能另在 `<数据目录>\skills\`）——**从不读插件缓存** | 需要 `-Elevate` 或管理员终端 |
 
-所以非管理员部署只改提示词，技能不会出现：`deploy.ps1` 会直接打印 `!! SKILLS NOT ACTIVE: n/7 ...` 并给出 `-Elevate` 命令。应用升级会覆盖安装目录，**每次升级后重跑一次 `deploy.cmd -Target <id> -Elevate`**。
+所以非管理员部署只改提示词，技能不会出现：`deploy.ps1` 会直接打印 `!! SKILLS NOT ACTIVE: n/7 ...` 并给出 `-Elevate` 命令。应用升级会覆盖安装目录，**每次升级后重跑一次 `deploy.cmd -Elevate`**。
 
 - 覆盖前备份到 `backups/<timestamp>/`（manifest 记录 `target`），逐文件 SHA256 校验。
-- 校验 7 个必备内置技能，然后跑一致性检查；`-SkipVerify` 可跳过。
+- 校验 7 个必备内置技能，然后逐目标跑一致性检查；`-SkipVerify` 可跳过。
 - `-Detailed` 输出完整映射；`-Template` / `-Skill` 只替换单个文件或技能。
+- 脚本里不再有写死的产品目录、数据目录或 PowerShell 路径：`$PSHOME` 起子进程，python 先找目标数据目录下的 `binaries\python\versions`。
 
 ## 技能
 
@@ -165,7 +181,7 @@ scripts\deploy.cmd -Skill team-orchestration
 
 ## 使用
 
-运行 `scripts\deploy.cmd` 即可：脚本自动检测运行时并写入插件缓存（管理员同时写安装镜像），不需要手动放置文件。只想渲染/校验时用 `npm run render` / `npm run check` / `npm run cache`。
+运行 `scripts\deploy.cmd` 即可：脚本自动检测所有安装并写入各自的插件缓存（加 `-Elevate` 同时写安装镜像），不需要手动放置文件、不需要为每个安装各跑一次。只想渲染/校验时用 `npm run render` / `npm run check` / `npm run cache`。
 
 ## License
 

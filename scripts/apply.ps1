@@ -210,7 +210,8 @@ function Get-PluginCacheRoot([string]$explicitRoot) {
     $configDir = $env:WORKBUDDY_CONFIG_DIR
     if (-not $configDir) {
         if (-not $env:USERPROFILE) { throw "USERPROFILE is not set; pass -PluginCacheRoot explicitly." }
-        $configDir = Join-Path $env:USERPROFILE ".workbuddy"
+        # 不写死 .workbuddy：按这套安装反查配对的数据目录
+        $configDir = Get-DefaultConfigDir -InstallPath $WorkBuddyPath -Id $targetProfile.Name
     }
     return [IO.Path]::GetFullPath((Join-Path $configDir "plugins\cache\workbuddy-builtin"))
 }
@@ -235,6 +236,10 @@ function Resolve-TargetRelative([string]$value) {
     if ($p -like 'welcome-mode\*.tpl') {
         $mode = [IO.Path]::GetFileNameWithoutExtension($p)
         return "plugins\workbuddy-builtin\welcomemode\$mode\prompt.tpl"
+    }
+    # project-root runtime-templates\<name>.tpl -> resources\templates\<name>.tpl
+    if ($p -like 'runtime-templates\*.tpl') {
+        return "templates\$([IO.Path]::GetFileName($p))"
     }
     # project-root fragments\<name>.md -> plugins\workbuddy-builtin\prompt-common\fragments\<name>.md
     if ($p -like 'fragments\*.md') {
@@ -346,7 +351,7 @@ function Ensure-BuiltinSkillCaches([string]$projectRoot, [string]$cacheRoot, [st
 function Register-BuiltinSkills([string[]]$plugins, [string]$cacheRoot, [string]$ver) {
     $added = @()
     if ($plugins.Count -eq 0) { return $added }
-    $registryDir = if ($ConfigDir) { $ConfigDir } else { Join-Path $env:USERPROFILE ".workbuddy" }
+    $registryDir = if ($ConfigDir) { $ConfigDir } else { Get-DefaultConfigDir -InstallPath $WorkBuddyPath -Id $targetProfile.Name }
     $path = Join-Path $registryDir "plugins\installed_plugins.json"
     if (-not (Test-Path -LiteralPath $path)) { return $added }
     $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
@@ -481,6 +486,13 @@ function Get-CustomMappings {
                 $inputs += [pscustomobject]@{ Base = $root; File = $file }
             }
         }
+        # runtime-templates: 真正被运行时读取的 templates\*.tpl（user-context / 模式切换提醒），默认部署
+        $runtimeDir = Join-Path $root "runtime-templates"
+        if (Test-Path -LiteralPath $runtimeDir) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $runtimeDir -File -Filter "*.tpl" -ErrorAction SilentlyContinue)) {
+                $inputs += [pscustomobject]@{ Base = $root; File = $file }
+            }
+        }
         $pluginsDir = Join-Path $root "plugins\workbuddy-builtin"
         if (Test-Path -LiteralPath $pluginsDir) {
             foreach ($file in @(Get-ChildItem -LiteralPath $pluginsDir -File -Recurse -ErrorAction SilentlyContinue |
@@ -504,7 +516,10 @@ function Get-CustomMappings {
         $rel = Normalize-RelativePath $file.FullName.Substring($basePath.Length + 1)
         $target = ""
 
-        if ($rel -like 'templates\*') {
+        if ($rel -like 'runtime-templates\*') {
+            # 这些 tpl 会被运行时读取（user-context / craft_mode 提醒），不受 -IncludeTemplates 门控
+            $target = "templates\$($file.Name)"
+        } elseif ($rel -like 'templates\*') {
             # templates\*.tpl 只被 [PromptRenderer] 的旁路渲染读取，不进入模型请求（见 README「实际生效链路」）
             if (-not $IncludeTemplates) { continue }
             $target = $rel
@@ -557,6 +572,9 @@ function Infer-TargetFromSource([string]$path) {
     }
     if ($probe -match '(?i)\\plugin-prompts\\(.+)$') {
         return "plugins\workbuddy-builtin\" + ($Matches[1] -replace '/', '\')
+    }
+    if ($probe -match '(?i)\\runtime-templates\\([^\\]+\.tpl)$') {
+        return "templates\" + $Matches[1]
     }
     if ($probe -match '(?i)\\templates\\(.+\.tpl)$') {
         return "templates\" + $Matches[1]

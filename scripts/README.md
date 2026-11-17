@@ -1,26 +1,45 @@
 # Scripts
 
-## One-click deploy (Windows)
+## One entry: deploy, restore, verify, pull, asar
+
+`scripts\deploy.cmd` is the only entry point. Everything else is an engine it calls.
 
 ```bat
-:: auto-discovers every installed runtime; asks for -Target only when more than one exists
+:: deploy to EVERY discovered installation (CN + AI in one run)
+scripts\deploy.cmd
+scripts\deploy.cmd -Elevate            :: same, one UAC prompt, also writes every install mirror
+scripts\deploy.cmd -Target workbuddy-ai :: one installation only (default: all)
 scripts\deploy.cmd -ListTargets
-
-scripts\deploy.cmd -Target workbuddy-ai
-scripts\deploy.cmd -Target workbuddy-ai -Elevate     :: writes the install mirror too (UAC)
-scripts\deploy.cmd -Target workbuddy-ai -DryRun
-scripts\deploy.cmd -NoInstall
+scripts\deploy.cmd -DryRun
 scripts\deploy.cmd -Template welcome-mode\work.tpl
 scripts\deploy.cmd -Skill team-orchestration
+scripts\deploy.cmd -SkipAsarPatch      :: skip the app.asar patch that a deploy otherwise applies
+
+::- restore
+scripts\deploy.cmd -Restore
+scripts\deploy.cmd -Restore -List
+scripts\deploy.cmd -Restore -BackupPath backups\<timestamp>
+scripts\deploy.cmd -Restore -Template welcome-mode\work.tpl
+scripts\deploy.cmd -Restore -Original
+scripts\deploy.cmd -Restore -DryRun
+
+::- verify / snapshot / asar
+scripts\deploy.cmd -Verify
+scripts\deploy.cmd -Pull
+scripts\deploy.cmd -Asar                :: app must be closed
+scripts\deploy.cmd -AsarRestore
 ```
 
-`deploy.ps1` discovers installations, delegates to `apply.ps1`, asserts 7 built-in skills, then runs `verify.ps1`.
+`deploy.ps1` resolves the target list once, then runs the chosen action for each installation:
+`apply.ps1` → product overrides (when present) → `app.asar` patch (when present) → `verify.ps1`,
+with one summary table and a non-zero exit code if any target failed.
+
 `deploy.cmd` only pauses when it is started with no arguments (double-click); a scripted call such as
 `deploy.cmd -Target workbuddy` returns instead of waiting for a keypress.
 
 ### Installations are discovered, not configured
 
-`scripts\targets.json` ships with empty paths. Discovery walks:
+`scripts\targets.json` ships with empty paths and no default target. Discovery walks:
 
 | side | sources |
 |---|---|
@@ -28,7 +47,11 @@ scripts\deploy.cmd -Skill team-orchestration
 | data | `%USERPROFILE%\.workbuddy*` and `WORKBUDDY_CONFIG_DIR` |
 | pairing | `<data>\.skill-list-cache.json` → `scopeKey` entry `...\<install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin\skills` |
 
-Target ids are derived from the install folder (`WorkBuddy` → `workbuddy`, `WorkBuddyAI` → `workbuddy-ai`). Fill `installPath` / `configDir` in `targets.json` only to pin a path.
+Target ids are derived from the install folder (`WorkBuddy` → `workbuddy`, `WorkBuddyAI` → `workbuddy-ai`).
+The data directory is taken from the pairing above; only when no pairing exists does it fall back to
+`%USERPROFILE%\.<id>`. Nothing in the scripts contains a hard-coded product directory: the child shell comes
+from `$PSHOME`, and python is looked up in `<data>\binaries\python\versions` before any user-level install.
+Fill `installPath` / `configDir` in `targets.json` only to pin a path.
 
 ### Prompts vs skills — two different read points
 
@@ -39,7 +62,7 @@ Target ids are derived from the install folder (`WorkBuddy` → `workbuddy`, `Wo
 
 So a non-admin deploy updates the prompt but leaves skills invisible. `deploy.ps1` detects that and prints
 `!! SKILLS NOT ACTIVE: n/7 ...` with the exact `-Elevate` command. App updates overwrite the install folder,
-so re-run `deploy.cmd -Target <id> -Elevate` after every upgrade.
+so re-run `deploy.cmd -Elevate` after every upgrade.
 
 - Existing files are backed up to `backups/<timestamp>/` (manifest records `target`); every copy is verified with SHA256.
 - `-Detailed` prints the full mapping; `-SkipVerify` skips the consistency check; `-Template` / `-Skill` target one file or one skill.
@@ -47,23 +70,25 @@ so re-run `deploy.cmd -Target <id> -Elevate` after every upgrade.
 ## Verify
 
 ```bat
-scripts\verify.cmd -Target workbuddy-ai -CheckIncludes
+scripts\deploy.cmd -Verify
 ```
 
-- Prints project / install / cache SHA256 for the three welcome templates and every builtin skill.
-- `-CheckIncludes` resolves each `{% include %}` in the newest version directory of every cached plugin.
+- Prints project / install / cache SHA256 for the three welcome templates and every builtin skill, per target.
+- Resolves each `{% include %}` in the newest version directory of every cached plugin.
 - Compares the newest trace against the last apply time: a request older than the deploy is reported as
   `STALE` and downgrades "forbidden marker still present" to exit code 2 (inconclusive), not a failure.
 
 ## Rollback
 
-```powershell
-scripts\restore.ps1 -Target workbuddy-ai -List
-scripts\restore.ps1 -Target workbuddy-ai -All
-scripts\restore.ps1 -BackupPath backups\<timestamp>
+```bat
+scripts\deploy.cmd -Restore -List
+scripts\deploy.cmd -Restore
+scripts\deploy.cmd -Restore -BackupPath backups\<timestamp>
+scripts\deploy.cmd -Restore -Original
 ```
 
 Backup sets are filtered by the `target` recorded in their manifest; older sets without the field show as `legacy`.
+`-Restore` runs for every discovered installation unless `-Target` narrows it.
 
 ## Render / check / cache
 
@@ -90,12 +115,13 @@ turn the gate on with `--mode-threshold N`.
 
 ## Files
 
-- `deploy.ps1` / `deploy.cmd` — one-click entry: discovery, elevation, skill assertion, verify.
-- `target.ps1` / `targets.json` — installation discovery + optional path pins.
+- `deploy.cmd` / `deploy.ps1` — the only entry: target discovery, one-shot elevation, then
+  deploy / `-Restore` / `-Verify` / `-Pull` / `-Asar` / `-AsarRestore` for every target.
+- `target.ps1` / `targets.json` — installation discovery, data-dir pairing, multi-target resolution, optional path pins.
 - `apply.ps1` — copy engine: source tree → install mirror + plugin cache, backups, skill registration.
 - `pull.ps1` — snapshot the current prompts into `archive/pulls/<target>-<timestamp>/`.
 - `verify.ps1` — consistency check across project / install / cache (+ include resolution).
-- `restore.ps1` — restore a previous backup, per target.
+- `restore.ps1` — restore a previous backup or the original baseline, per target.
 - `render.js` — Nunjucks render of all 15 template/mode combinations (release layout).
 - `check.js` — structural assertions on the renders.
 - `render-check.js` — same render from the project layout, with edition profiles; `--root` renders any layout.

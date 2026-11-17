@@ -1,4 +1,4 @@
-# Shared target resolver for WorkBuddy / WorkBuddy AI installations.
+﻿# Shared target resolver for WorkBuddy / WorkBuddy AI installations.
 # Dot-source this file: . "$PSScriptRoot\target.ps1"
 #
 # Nothing about install paths is hard-coded. Targets are DISCOVERED from
@@ -182,6 +182,25 @@ function Get-InstallPathFromDataDir([string]$configDir) {
     return ""
 }
 
+# 数据目录按安装反查，不写死产品名：先看哪个 .workbuddy* 的 .skill-list-cache.json 指向这套安装，
+# 再退回 <USERPROFILE>\.<id>（id 由安装目录名推导：WorkBuddy → workbuddy，WorkBuddyAI → workbuddy-ai）。
+function Get-PairedConfigDir([string]$installPath) {
+    if ([string]::IsNullOrWhiteSpace($installPath)) { return "" }
+    foreach ($dir in @(Get-DataDirCandidates)) {
+        $paired = Get-InstallPathFromDataDir $dir
+        if ($paired -and $paired.TrimEnd('\') -ieq $installPath.TrimEnd('\')) { return $dir }
+    }
+    return ""
+}
+
+function Get-DefaultConfigDir {
+    param([string]$InstallPath = "", [string]$Id = "")
+    $paired = Get-PairedConfigDir $InstallPath
+    if ($paired) { return $paired }
+    if ($Id -and $env:USERPROFILE) { return (Join-Path $env:USERPROFILE ".$Id") }
+    return ""
+}
+
 function Get-DiscoveredTargets {
     $installs = @(Get-InstallCandidates)
     $dataDirs = @(Get-DataDirCandidates)
@@ -205,7 +224,7 @@ function Get-DiscoveredTargets {
     foreach ($i in $installs) {
         if (@($result | Where-Object { $_.InstallPath -eq $i.InstallPath }).Count -gt 0) { continue }
         $id = Get-TargetId $i.InstallPath $i.ExeName
-        $guess = Join-Path $env:USERPROFILE $(if ($id -eq "workbuddy-ai") { ".workbuddy-ai" } elseif ($id -eq "workbuddy") { ".workbuddy" } else { ".$id" })
+        $guess = Get-DefaultConfigDir -InstallPath $i.InstallPath -Id $id
         $result += [pscustomobject]@{
             Id = $id
             Label = (Split-Path -Leaf $i.InstallPath)
@@ -266,10 +285,11 @@ function Resolve-TargetProfile {
                  elseif ($disc) { $disc.ConfigDir }
                  else { "" }
     if (-not $configDir) {
-        $guess = Join-Path $env:USERPROFILE ".$name2"
-        if ([IO.Directory]::Exists($guess)) { $configDir = $guess }
+        $configDir = Get-DefaultConfigDir -InstallPath $install -Id $name2
     }
-    if (-not $configDir) { $configDir = Join-Path $env:USERPROFILE ".workbuddy" }
+    if (-not $configDir) {
+        throw "Cannot determine the data directory for target '$name2'. Pass -ConfigDir explicitly."
+    }
 
     $cacheRoot = if ($CacheRootOverride) { Expand-TargetToken $CacheRootOverride }
                  else { Join-Path $configDir "plugins\cache\workbuddy-builtin" }
@@ -298,4 +318,34 @@ function Get-TargetNames([string]$ScriptRoot = $PSScriptRoot) {
     if ($cfg.targets) { $ids += @($cfg.targets.PSObject.Properties.Name) }
     $ids += @(Get-DiscoveredTargets | ForEach-Object { $_.Id })
     return @($ids | Select-Object -Unique)
+}
+
+# 解析一批目标：-Names "all"（或 "*"、空）= 所有已发现且可用的安装，逐个返回 profile；
+# 否则接受逗号分隔的 id 列表。调用方据此一次改多套安装。
+function Resolve-TargetProfiles {
+    param(
+        [string]$Names = "all",
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    $list = @()
+    $wantsAll = (-not $Names) -or $Names -eq "all" -or $Names -eq "*"
+    if ($wantsAll) {
+        foreach ($id in @(Get-TargetNames $ScriptRoot)) {
+            try {
+                $p = Resolve-TargetProfile -Name $id -ScriptRoot $ScriptRoot
+                if ($p.Installed -or $p.ConfigExists) { $list += $p }
+            } catch { }
+        }
+        $list = @($list | Sort-Object Name)
+        if ($list.Count -eq 0) {
+            throw "No installation found. Install WorkBuddy / WorkBuddy AI, or pass -Target <id> with -WorkBuddyPath / -ConfigDir."
+        }
+        return $list
+    }
+
+    foreach ($id in ($Names -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        $list += (Resolve-TargetProfile -Name $id -ScriptRoot $ScriptRoot)
+    }
+    return @($list)
 }

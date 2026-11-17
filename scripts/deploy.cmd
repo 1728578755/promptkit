@@ -1,5 +1,6 @@
 @echo off
 setlocal
+if "%~1"=="" echo [WorkBuddy] Deploying to every detected installation... for restore use: deploy.cmd -Restore
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy.ps1" %*
 echo.
 rem Pause only for an interactive double-click (no arguments). A scripted call such as

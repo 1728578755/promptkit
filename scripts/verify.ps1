@@ -124,7 +124,7 @@ function Resolve-CacheRoot([string]$explicitPath) {
     if ($explicitPath) { return $explicitPath }
     if ($ConfigDir) { return (Join-Path $ConfigDir "plugins\cache\workbuddy-builtin") }
     $configDir = $env:WORKBUDDY_CONFIG_DIR
-    if (-not $configDir) { $configDir = Join-Path $env:USERPROFILE ".workbuddy" }
+    if (-not $configDir) { $configDir = Get-DefaultConfigDir -InstallPath $WorkBuddyPath -Id $targetProfile.Name }
     return (Join-Path $configDir "plugins\cache\workbuddy-builtin")
 }
 

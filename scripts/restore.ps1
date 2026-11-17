@@ -94,7 +94,8 @@ function Get-PluginCacheRoot([string]$explicitRoot) {
     $configDir = $env:WORKBUDDY_CONFIG_DIR
     if (-not $configDir) {
         if (-not $env:USERPROFILE) { return "" }
-        $configDir = Join-Path $env:USERPROFILE ".workbuddy"
+        # 不写死 .workbuddy：按这套安装反查配对的数据目录
+        $configDir = Get-DefaultConfigDir -InstallPath $WorkBuddyPath -Id $targetProfile.Name
     }
     return [IO.Path]::GetFullPath((Join-Path $configDir "plugins\cache\workbuddy-builtin"))
 }

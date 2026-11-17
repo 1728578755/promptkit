@@ -1,7 +1,7 @@
 {
   "version": 2,
   "default": "",
-  "_comment": "Nothing here is required: installations are auto-discovered (uninstall registry, App Paths, running processes, <drive>:\\Program Files*\\WorkBuddy*, %USERPROFILE%\\.workbuddy*). Set default or a target's installPath/configDir only to pin a specific installation.",
+  "_comment": "Nothing here is required. Every installation is discovered at run time (uninstall registry, App Paths, running processes, <drive>:\\Program Files*\\WorkBuddy*, %USERPROFILE%\\.workbuddy*), and one deploy run updates all of them. Fill installPath / configDir only to pin a specific installation; set default only to make a bare `apply.ps1` / `verify.ps1` call pick one target.",
   "targets": {
     "workbuddy": {
       "label": "WorkBuddy (CN edition)",

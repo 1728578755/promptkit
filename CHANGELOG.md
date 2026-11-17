@@ -2,6 +2,44 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.1.1 — 2026-11-17
+
+主题：**只留一个入口，一次改完所有安装。**
+
+### 单入口
+
+- 只保留 `scripts\deploy.cmd`。`restore.cmd`、`restore-original.cmd`、`verify.cmd`、`pull.cmd`、`apply-asar.cmd`、`restore-asar.cmd`（含 `-elevated` 变体）都变成它的动作：
+
+| 旧命令 | 现在 |
+|---|---|
+| `restore.cmd -List` / `-All` / `-Template X` / `-Original` | `deploy.cmd -Restore -List` / `-Restore` / `-Restore -Template X` / `-Restore -Original` |
+| `verify.cmd -CheckIncludes` | `deploy.cmd -Verify` |
+| `pull.cmd` | `deploy.cmd -Pull` |
+| `apply-asar.cmd` | `deploy.cmd -Asar` |
+| `restore-asar.cmd` | `deploy.cmd -AsarRestore` |
+
+### 多安装同时改
+
+- 默认目标从"一套"变成"所有已发现的安装"：一次运行同时更新 WorkBuddy 与 WorkBuddy AI 的插件缓存，逐目标备份、逐目标校验、汇总表输出，任一目标失败即非零退出。
+- `-Elevate` 只弹一次 UAC，随后写两侧安装镜像；`-Target workbuddy` / `-Target workbuddy-ai` 仍可只改一套。
+- `targets.json` 不再带默认目标，`-Target` 缺省即 `all`。
+
+### 去写死目录
+
+- `apply.ps1` / `restore.ps1` / `verify.ps1` / `target.ps1` 里写死的 `%USERPROFILE%\.workbuddy` 兜底全部删除：改为按 `.skill-list-cache.json` 的 `scopeKey` 与本安装配对反查，配不上才退回 `%USERPROFILE%\.<id>`。
+- `deploy.ps1` 不再写死 `WindowsPowerShell\v1.0\powershell.exe`（用 `$PSHOME`，找不到再回退 PATH），python 先找目标数据目录下的 `binaries\python\versions`。
+
+### 脚本修复
+
+- 子脚本输出在重定向、CI、IDE 终端下被吞掉：改为捕获后经 `Write-Host` 回显。
+- `-DryRun` 不再触发 UAC；`-Restore -DryRun` 的备注从"已恢复"改为"仅预演"。
+- `patch-asar.py` 退出码 2（当前构建里找不到锚点）记为 `SKIP`，不再算失败。
+
+### 兼容性
+
+- `deploy.cmd -Template` / `-Skill` / `-DryRun` / `-ListTargets` / `-SkipAsarPatch` / `-NoInstall` 等参数不变。
+- 旧命令不再存在；仓库历史与 CHANGELOG 旧条目保留原始命令名。
+
 ## v1.1.0 — 2026-11-17
 
 主题：**为前缀缓存重排提示词顺序，并把易变内容全部压到最末尾。**
