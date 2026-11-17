@@ -2,6 +2,57 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.1.6 — 2026-11-17
+
+主题：**移除三段——`<quality_policy>` / `<agent_loop>` / `<regional_conventions>`。**
+用户指令：「去掉 quality_policy，agent_loop，regional_conventions」。
+
+### 改了什么
+
+| 位置 | 动作 | 字节 |
+|---|---|---:|
+| `fragments/policy-common.md` | 删掉 `<quality_policy>` 整段（quick / ask / 其余三个分支一起删），只留 `<refusal_policy>` | 4,609 → 572 |
+| `fragments/regional-conventions.md` | 整文件删除 | −116 |
+| `plugins/**/interactionmode/{craft,plan,expert}/fragments/agent-loop.md` | 整文件删除；`ask/agent-loop.md`（0 字节空文件）一并删除 | −269 / −346 / −346 / 0 |
+| `welcome-mode/{work,code,design}.tpl` | 删掉 `regional-conventions` 与 `agent-loop` 两处 include，包括只为它们存在的 `{% elif %}` 分支 | — |
+| `fragments/agent-contract.md` | 去掉对已删质量节的悬空引用：`"Done" is defined by the quality policy above.` → `"Done" means verified, not attempted.` | −10 |
+
+### 渲染变化（CN 档，`npm run render` 后 dist 的字节）
+
+| 模板 / 模式 | 前 | 后 | 变化 |
+|---|---:|---:|---:|
+| work·code craft | 13,538 | 10,315 | −3,223（−23.81%） |
+| work·code plan | 14,544 | 11,244 | −3,300（−22.69%） |
+| work·code expert | 13,869 | 10,569 | −3,300（−23.79%） |
+| work·code ask | 4,741 | 3,438 | −1,303（−27.48%） |
+| work·code quick | 1,967 | 1,583 | −384（−19.52%） |
+| design craft | 18,939 | 15,716 | −3,223（−17.02%） |
+| design plan | 19,945 | 16,645 | −3,300（−16.55%） |
+| design expert | 19,270 | 15,970 | −3,300（−17.13%） |
+| design ask | 6,512 | 5,209 | −1,303（−20.01%） |
+| design quick | 5,265 | 4,765 | −500（−9.50%） |
+| **15 份合计** | **167,249** | **132,603** | **−34,646（−20.72%）** |
+
+### 断言与脚本
+
+- `scripts/render-check.js`：新增 `REMOVED_BLOCKS` 断言——任何模板 / 模式 / 档位出现这三个标签即退出码 1。
+  原来只在国际版下检查 `<regional_conventions>`，现在是两个档位、五个模式、三份模板全查。
+- `scripts/check.js`：原来的 `missing quality policy` 断言（要求存在）反转为「出现即失败」，并覆盖三段。
+- `package.json` / `package-lock.json`：1.1.5 → 1.1.6。
+
+### 缓存影响（`npm run cache -- --strict`）
+
+- 同模式场景最低命中率 96.94% → 96.19%，95% 门禁仍通过；换模型场景保持 99.98%。
+- 跨模式 `craft~ask` 大幅变好：work·code 19.66% → **36.22%**，design 14.2% → **73.07%**（ask 不再有与 craft 不同的质量分支）。
+- 跨模式 `craft~plan` 79.98% → 75.87% 是算术效应，不是缓存退化：删掉的约 2.9K 属于 craft/plan 共享前缀，
+  分母同时少了约 3.2K；绝对公共前缀 9,795 → 6,882 字符，与提示词缩短幅度同量级。
+
+### 验证
+
+- `npm run render` / `npm run check` / `npm run render-check -- --profile cn` / `--profile ai` /
+  `npm run cache -- --strict` / `npm run check-memory` 全部退出码 0；15 份渲染均 `removed_blocks=0`。
+- 被删的原文可从本仓库历史取回（`git show v1.1.5:fragments/policy-common.md` 等）。
+
 ## v1.1.5 — 2026-11-17
 
 主题：**一键恢复脚本。**

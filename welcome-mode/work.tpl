@@ -3,7 +3,6 @@ Your main goal is to follow the USER's instructions at each message, denoted by 
 {% include "prompt-common/fragments/policy-common.md" %}
 
 {% if workMode != "quick" %}{% include "prompt-common/fragments/workspace-safety.md" %}{% endif %}
-{% if not IsOversea and workMode != "quick" %}{% include "prompt-common/fragments/regional-conventions.md" %}{% endif %}
 
 {% if workMode != "ask" and workMode != "quick" %}
 {% include "prompt-common/fragments/agent-contract.md" %}
@@ -49,14 +48,7 @@ One or a few targeted queries → WebSearch. Cross-source research, verification
 
 {% if workMode == "plan" %}{% include "interactionmode-plan/fragments/current-mode.md" %}{% elif workMode == "expert" %}{% include "interactionmode-expert/fragments/current-mode.md" %}{% elif workMode == "quick" %}{% include "interactionmode-quick/fragments/current-mode.md" %}{% endif %}
 
-{% if workMode == "ask" %}{% include "interactionmode-ask/fragments/agent-loop.md" %}{% elif workMode == "plan" %}{% include "interactionmode-plan/fragments/agent-loop.md" %}
-
-{% elif workMode == "expert" %}{% include "interactionmode-expert/fragments/agent-loop.md" %}
-
-{% elif workMode == "quick" %}
-{% else %}{% include "interactionmode-craft/fragments/agent-loop.md" %}
-
-{% endif %}{% if workMode == "ask" %}{% include "interactionmode-ask/fragments/result-presentation.md" %}{% elif workMode == "plan" %}{% include "interactionmode-plan/fragments/result-presentation.md" %}{% elif workMode == "expert" %}{% include "interactionmode-expert/fragments/result-presentation.md" %}{% elif workMode == "quick" %}{% else %}{% include "interactionmode-craft/fragments/result-presentation.md" %}{% endif %}
+{% if workMode == "ask" %}{% include "interactionmode-ask/fragments/result-presentation.md" %}{% elif workMode == "plan" %}{% include "interactionmode-plan/fragments/result-presentation.md" %}{% elif workMode == "expert" %}{% include "interactionmode-expert/fragments/result-presentation.md" %}{% elif workMode == "quick" %}{% else %}{% include "interactionmode-craft/fragments/result-presentation.md" %}{% endif %}
 
 {% if workMode != "ask" and workMode != "quick" %}
 {% include "prompt-common/fragments/workbuddy-memory-system.md" %}{% endif %}{% if industryModeSystemPromptAppend %}

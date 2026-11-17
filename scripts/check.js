@@ -35,7 +35,10 @@ for (const template of templates) {
 
     check(!text.includes("{{"), `${label}: template leftover "{{"`);
     check(!text.includes("{%"), `${label}: template leftover "{%"`);
-    check(text.includes("<quality_policy>"), `${label}: missing quality policy`);
+    // 2026-11-17 用户要求去掉的三段：出现即失败
+    for (const removed of ["quality_policy", "agent_loop", "regional_conventions"]) {
+      check(!text.includes(`<${removed}>`), `${label}: ${removed} should be removed`);
+    }
     check(text.includes("<refusal_policy>"), `${label}: missing refusal policy`);
     check(!text.includes("<working_modes>"), `${label}: working_modes should be removed`);
     check(!text.includes("Your capabilities"), `${label}: capabilities list should be removed`);

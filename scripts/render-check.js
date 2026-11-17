@@ -82,6 +82,9 @@ const env = new nunjucks.Environment(createLoader(), { autoescape: false, throwO
 if (dist) fs.mkdirSync(dist, { recursive: true });
 if (RENDER_ROOT !== ROOT) console.log("render root: " + RENDER_ROOT);
 
+// 2026-11-17 用户明确要求去掉的三段：任何一份渲染结果里都不许再出现
+const REMOVED_BLOCKS = ["quality_policy", "agent_loop", "regional_conventions"];
+
 let failures = 0;
 for (const template of templates) {
   for (const mode of modes) {
@@ -95,19 +98,22 @@ for (const template of templates) {
       continue;
     }
     const leftover = (out.match(/\{\{|\{%/g) || []).length;
-    const regional = (out.match(/<regional_conventions>/g) || []).length;
+    const hits = REMOVED_BLOCKS
+      .map((tag) => [tag, (out.match(new RegExp(`<${tag}>`, "g")) || []).length])
+      .filter(([, count]) => count > 0);
     const policy = (out.match(/<content_policy>/g) || []).length;
     if (dist) fs.writeFileSync(path.join(dist, `${template}-${mode}.md`), out, "utf8");
     console.log(
       `${template}/${mode}: ${Buffer.byteLength(out)} bytes, leftover=${leftover}, ` +
-      `regional=${regional}, content_policy=${policy}`
+      `removed_blocks=${hits.length ? hits.map(([tag, n]) => `${tag}:${n}`).join(",") : 0}, ` +
+      `content_policy=${policy}`
     );
     if (leftover > 0) failures++;
+    if (hits.length > 0) failures++;
     if (template !== "design" && mode !== "quick" && policy > 0) failures++;
   }
 }
 
-const expectRegional = profile === "cn";
-console.log(`\nprofile=${profile}; regional_conventions expected=${expectRegional}`);
+console.log(`\nprofile=${profile}; removed blocks (${REMOVED_BLOCKS.join(" / ")}) expected=0 in every render`);
 console.log(failures === 0 ? "RENDER OK" : `RENDER FAILURES: ${failures}`);
 process.exit(failures === 0 ? 0 : 1);

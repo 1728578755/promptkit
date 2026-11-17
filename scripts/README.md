@@ -117,8 +117,9 @@ npm run cache -- --strict                       # fail when a same-mode scenario
 npm run check-memory                            # <memory_system>/<memory_paths> across the four switches
 ```
 
-`render-check.js` also asserts: no leftover `{{`/`{%`, no `<regional_conventions>` under the AI profile,
-and no `<content_policy>` in any mode.
+`render-check.js` also asserts: no leftover `{{`/`{%`, no `<content_policy>` in any mode, and none of
+the three blocks removed on 2026-11-17 (`<quality_policy>` / `<agent_loop>` / `<regional_conventions>`)
+in any template/mode under either profile — a hit exits with code 1.
 
 `cache-prefix.js` renders two versions of the same prompt that differ in exactly one variable (project
 folder, account memory path, model name, working memory, user memory, industry mode) and reports the

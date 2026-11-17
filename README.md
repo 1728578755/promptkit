@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.1.5**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.1.6**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -15,8 +15,8 @@ PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。
 3. **模式边界**
    Agent / Plan / Ask / Quick 各自声明能做什么、不能做什么；工具与副作用限制优先于其他策略。
 
-4. **质量闸门**
-   完成定义 → 风险分层验证 → 证据规则 → 交付前检查。短答案也要有检查，长答案不堆砌。
+4. **不写质量宣言**
+   2026-11-17 起基座不再注入 `<quality_policy>`（原「完成定义 → 风险分层验证 → 证据规则 → 交付前检查」五段）。验证要求改由三段承担：模式边界（Ask 只读、Quick 从简）、`agent-contract` 的一句话「Done means verified, not attempted」，以及具体技能里的验收步骤。要加验证要求，写进技能或对应模式片段，而不是塞回恒定层——那是每轮都要付的固定成本。
 
 5. **团队面板**
    并行或多角色工作走团队成员面板（创建 → 派任务 → 收结论 → 关闭），而不是散装子代理。
@@ -50,8 +50,8 @@ package.json     nunjucks 依赖与 npm scripts
 
 | 层 | 内容 | 何时会变 |
 |---|---|---|
-| **A 恒定层** | preamble → `policy-common` → `workspace-safety` / `regional-conventions` → `agent-contract` → `search_routing` → `wecom-account-routing` → `tool-routing` → `asking-questions` → `tool-usage-policy` → `agent-skills` → `tool-use` / `task-management` | 只在改提示词或换安装时才变；craft / plan / expert 三者逐字相同 |
-| **B 模式层** | `interaction`（frontmatter 不进正文）→ `mode-behavior`（ask）→ `current-mode` → `agent-loop` → `result-presentation` | 只在对话内切换模式时变 |
+| **A 恒定层** | preamble → `policy-common` → `workspace-safety` → `agent-contract` → `search_routing` → `wecom-account-routing` → `tool-routing` → `asking-questions` → `tool-usage-policy` → `agent-skills` → `tool-use` / `task-management` | 只在改提示词或换安装时才变；craft / plan / expert 三者逐字相同 |
+| **B 模式层** | `interaction`（frontmatter 不进正文）→ `mode-behavior`（ask）→ `current-mode` → `result-presentation` | 只在对话内切换模式时变 |
 | **C 会话层** | `memory_system` → `industry_mode_context` → `<memory>` → `<user_memory>` → `<memory_paths>` → `This conversation is powered by …` | 换项目 / 换账号 / 记忆更新 / 换模型，全部压到最后 |
 
 四条规则：
@@ -113,7 +113,7 @@ npm run render        # 3 模板 × 5 模式 → dist/
 npm run check         # 结构断言：无模板残留、关键段落、模式边界
 ```
 
-`npm run render-check` 在渲染之外还断言：没有残留 `{{` / `{%`、国际版上下文下没有 `<regional_conventions>`、任何模式都没有 `<content_policy>`。
+`npm run render-check` 在渲染之外还断言：没有残留 `{{` / `{%`、任何模式都没有 `<content_policy>`，以及 2026-11-17 移除的三段（`<quality_policy>` / `<agent_loop>` / `<regional_conventions>`）在 CN 与 AI 两个档位、五个模式下都为 0——出现即退出码 1。
 
 ## 一键部署与恢复（Windows）
 
