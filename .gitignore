@@ -5,3 +5,7 @@ node_modules/
 dist/
 backups/
 archive/
+
+# python bytecode must never ship
+__pycache__/
+*.pyc
