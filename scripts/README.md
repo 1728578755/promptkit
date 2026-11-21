@@ -121,8 +121,8 @@ lead-in and the per-turn mode reminders; the script asserts each one renders as 
 Diagnostics that never write: `dump-system-prompt.py`, `dump-messages.py`, `trace-tokens.py`,
 `trace-turns.py`, `measure-prompt-blocks.py`, `measure-injected.py`, `measure-injection.py`,
 `list-desc.py`, `asar-grep.py`, `cache-compare.js`, `src-context.py`, `verify-tool-overrides.py`,
-`measure-product.py`, `tool-desc-map.py`, `export-tool-desc.py`, `test-user-context-once.js`,
-`test-asar-restart.py`. `uc-seen.py` only touches `<config>\uc-seen\` (list / seed / clear / prune).
+`measure-product.py`, `tool-desc-map.py`, `export-tool-desc.py`, `test-user-context-once.js`.
+`uc-seen.py` only touches `<config>\uc-seen\` (list / seed / clear / prune).
 
 ## Verify
 
@@ -213,5 +213,3 @@ turn the gate on with `--mode-threshold N`.
   `--count`, `--seed` (mark every session that already has a transcript, so an old chat stops
   re-injecting), `--clear <sid>`, `--prune <days>`.  `--seed` takes effect immediately: the patch
   re-reads the marker on every compose, no restart needed.
-- `test-asar-restart.py` — asserts the close→wait-unlock→relaunch chain: process matching is by full
-  exe path, killing is `/PID` only (never `/IM`), and a same-named copy is never touched. 16 checks.

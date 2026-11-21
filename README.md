@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.0**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.1**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -169,8 +169,7 @@ scripts\restore.cmd -DryRun               :: 只看计划
 
 scripts\deploy.cmd -Verify                :: 每个目标的一致性校验（含 include 解析）
 scripts\deploy.cmd -Pull                  :: 每个目标快照到 archive\pulls\
-scripts\deploy.cmd -Asar                  :: 提权 → 自己关掉应用 → 打 app.asar 补丁 → 再启动
-scripts\deploy.cmd -Asar -NoRestart       :: 只打补丁，不自动关/开（应用在跑时会 FAIL，不静默跳过）
+scripts\deploy.cmd -Asar                  :: 退出应用后：提权 → 打 app.asar 补丁 → 再把应用拉起来
 scripts\deploy.cmd -AsarRestore           :: 还原 app.asar
 scripts\deploy.cmd -SkipAsarPatch         :: 本次部署不打 asar 补丁
 scripts\deploy.cmd -SkipProductOverrides  :: 本次部署不动 product.json
@@ -241,29 +240,27 @@ SHA256 都回到改前。**WorkBuddy 升级会同时覆盖 `app.asar` 和 exe，
 ```bat
 python scripts\patch-asar.py --status  --asar "<安装目录>\resources\app.asar"   :: 只读体检
 python scripts\patch-asar.py --dry-run --asar "<安装目录>\resources\app.asar"
-python scripts\patch-asar.py --apply --restart --asar "<安装目录>\resources\app.asar"   :: 关进程→注入→再启动
 scripts\deploy.cmd -Asar                :: 关掉应用后：提权 → 打补丁 → 重启
 scripts\deploy.cmd -AsarRestore         :: 还原
 scripts\deploy.cmd -SkipAsarPatch       :: 本次部署跳过 asar（默认会打）
 ```
 
 退出码：`0` 已打好/无需再打，`2` 这个构建里找不到锚点（跳过，不写任何字节），`3` 需要提权，
-`4` 应用正在运行且未允许自动关闭（只有加了 `-NoRestart` 才会出现）。`--asar` 省略时按 `WORKBUDDY_INSTALL` → `scripts\targets.json` 的 `installPath`
+`4` 应用正在运行（先完全退出，脚本不会替你结束进程）。`--asar` 省略时按 `WORKBUDDY_INSTALL` → `scripts\targets.json` 的 `installPath`
 → 卸载登记项（`DisplayIcon` / `InstallLocation` / `UninstallString`，且目录里必须真有 `WorkBuddy*.exe`）
 的顺序找；都没有就报错，不扫盘、不猜目录。
 
-#### 1.1 一键「关闭 → 注入 → 重启」
+#### 1.1 脚本不会去杀 WorkBuddy
 
-`deploy.cmd` 默认就替你关应用：写 asar 前先识别谁占着文件（按**可执行文件全路径**匹配进程，
-不是按映像名），先请它自己关（8 秒），不退出再强杀它自己的进程树（15 秒），
-然后等 asar / exe 解锁（40 秒）→ 写入 → 再把它启动回来。
+写 asar 与 exe 清单时应用必须不在运行（Electron 把两者整份映射住，写入被系统拒绝）。
+本工具链**不会**替你结束进程：检测到被占用就以退出码 `4` 拒绝，一个字节都不写，并提示你完全退出（含托盘）后重跑。
 
 | 行为 | 说明 |
 |---|---|
-| 只关该关的 | `taskkill /PID … /T`，逐个 pid。**永不使用 `/IM`**——按名字批量杀会连带杀掉别处的同名副本或另一个版本（实测踩过） |
-| 写入失败也会重启 | 关进程后注册了退出钩子：无论后面是校验失败、异常还是提前返回，进程结束前一定把应用开回来 |
-| 打完必收口 | 补丁写完立刻用 `--status` 复核：任一补丁不是 `patched`、`integ` 或 `exe sync` 不是 `MATCH`，本次部署记 `FAIL`、整条命令 `exit 1`，不会"看起来成功" |
-| 不想要就关掉 | `-NoRestart`（或旧参数 `-NoRelaunch`）：应用在跑时直接 `FAIL` 并提示，绝不静默跳过 |
+| 只检测，不动手 | 用「试写一次」判断 asar/exe 是否被锁；被锁就 `exit 4`，不写任何字节 |
+| 部署会如实报失败 | `deploy.ps1` 把 asar 的 `exit 4` 记为 `FAIL`，整条命令 `exit 1`，不会"看起来成功" |
+| 打完必收口 | 补丁写完立刻用 `--status` 复核：任一补丁不是 `patched`、`integ` 或 `exe sync` 不是 `MATCH`，同样记 `FAIL` 并 `exit 1` |
+| 重启由你来 | `-Asar` 成功后会经资源管理器把应用拉起来（`-NoRelaunch` 可关），但前提是你自己先退出了它 |
 | 需要管理员 | 写 `Program Files` 与 exe 清单要提权；`deploy.cmd` 无参数会自提权一次 |
 
 ### 2. `product.json` 工具描述覆盖
@@ -336,7 +333,6 @@ npm run runtime       # 渲染四个 tpl 并断言注入块已按预期去掉（
 | `test-user-context-once.js` | 断言 `user-context-once` 补丁的判据仍在（改完提示词必跑） |
 | `trace-turns.py` | 按轮读 trace 的请求体，判断某块是首轮一次还是每轮都有（附实测：trace 只落每个会话的首个请求） |
 | `uc-seen.py` | `user-context-durable` 的标记管理：`--count` / `--seed` / `--clear <sid>` / `--prune 30` |
-| `test-asar-restart.py` | 断言「关进程→等解锁→再启动」链路：只按 `/PID` 杀、同名副本不误杀（16 项） |
 
 ## 技能
 

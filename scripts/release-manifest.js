@@ -81,7 +81,6 @@ const REQUIRED = {
     "scripts/src-context.py",
     "scripts/trace-tokens.py",
     "scripts/trace-turns.py",
-    "scripts/test-asar-restart.py",
     "scripts/test-user-context-once.js",
     "scripts/release-manifest.js",
     "scripts/release-audit.js",
@@ -130,7 +129,6 @@ const SYNC_FILES = [
   "scripts/trace-tokens.py",
   "scripts/uc-seen.py",
   "scripts/trace-turns.py",
-  "scripts/test-asar-restart.py",
   "scripts/verify-tool-overrides.py",
   // 发布工具与 JS 诊断
   "scripts/release-manifest.js",

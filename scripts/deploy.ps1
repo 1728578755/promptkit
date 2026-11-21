@@ -16,7 +16,6 @@ param(
     [switch]$SkipVerify,
     [switch]$Detailed,
     [switch]$NoRelaunch,
-    [switch]$NoRestart,
 
     # --- deploy options (forwarded to apply.ps1) ---
     [switch]$All,
@@ -93,8 +92,6 @@ elseif ($Restore) { $action = "restore" }
 elseif ($Verify) { $action = "verify" }
 elseif ($Pull) { $action = "pull" }
 
-# 一键「关闭 → 注入 → 重启」：默认开启。-NoRestart / -NoRelaunch 任一都退回旧行为（要求先手动关闭应用）。
-$autoRestart = (-not $NoRestart) -and (-not $NoRelaunch)
 
 # --- elevation: ask once, then every target is written from the same elevated run ---
 $needsAdmin = ((($action -eq "asar") -or ($action -eq "asar-restore")) -and (-not $DryRun))
@@ -224,7 +221,6 @@ function Invoke-AsarPatch($profile, $result) {
     $env:PYTHONIOENCODING = "utf-8"
     $asarOut = @()
     $asarArgs = @("-X", "utf8", $script, "--apply", "--asar", $asar)
-    if ($autoRestart) { $asarArgs += "--restart" }
     try {
         $asarOut = @(& $py @asarArgs 2>&1 | ForEach-Object { [string]$_ })
         $asarCode = $LASTEXITCODE
@@ -236,7 +232,6 @@ function Invoke-AsarPatch($profile, $result) {
     switch ($asarCode) {
         0 {
             if ($asarText -match 'already patched') { Add-Note $result "app.asar already patched" }
-            elseif ($asarText -match '(?m)^已重新启动') { Add-Note $result "app.asar patched (auto close -> patch -> relaunch)" }
             else { Add-Note $result "app.asar patched" }
         }
         2 {
@@ -245,7 +240,7 @@ function Invoke-AsarPatch($profile, $result) {
         }
         3 { Add-Note $result "app.asar needs -Elevate"; $result.Status = "FAIL" }
         4 {
-            Add-Note $result "app.asar NOT written (app running; rerun without -NoRestart)"
+            Add-Note $result "app.asar NOT written (app running; close WorkBuddy and rerun)"
             $result.Status = "FAIL"
         }
         default {
@@ -438,19 +433,15 @@ function Invoke-AsarTarget($profile, [string]$mode) {
     if ($mode -eq "apply" -and -not $DryRun) {
         $exe = if ($profile.ExeName) { [IO.Path]::GetFileNameWithoutExtension($profile.ExeName) } else { "WorkBuddy" }
         $running = @(Get-Process -Name $exe -ErrorAction SilentlyContinue)
-        if ($running.Count -gt 0 -and -not $autoRestart) {
-            Add-Note $result ("app running ({0} processes); -NoRestart given, app.asar 未写入" -f $running.Count)
+        if ($running.Count -gt 0) {
+            Add-Note $result ("app running ({0} processes) - 脚本不会去杀它，请自己完全退出后重跑" -f $running.Count)
             $result.Status = "FAIL"
             return $result
-        }
-        if ($running.Count -gt 0) {
-            Add-Note $result ("app running ({0} processes) -> close, patch, relaunch" -f $running.Count)
         }
     }
 
     $args = @($script, "--asar", $asar)
     if ($DryRun) { $args += "--dry-run" } else { $args += "--$mode" }
-    if ($autoRestart -and -not $DryRun -and $mode -eq "apply") { $args += "--restart" }
     Invoke-Python $py $args
     $code = $LASTEXITCODE
     if ($code -eq 2) {
@@ -465,7 +456,7 @@ function Invoke-AsarTarget($profile, [string]$mode) {
     }
     $result.Status = "OK"
 
-    if ($mode -eq "apply" -and -not $DryRun -and -not $autoRestart -and -not $NoRelaunch) {
+    if ($mode -eq "apply" -and -not $DryRun -and -not $NoRelaunch) {
         $exePath = Join-Path $profile.InstallPath $profile.ExeName
         if (Test-Path -LiteralPath $exePath) {
             # 必须经资源管理器启动：直接 Start-Process 会继承提权令牌，应用会以管理员身份运行

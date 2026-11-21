@@ -2,7 +2,23 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.1 — 2026-11-21
+
+主题：**移除"主动结束 WorkBuddy 进程"的能力**，改为只检测、不动手。
+
+- `deploy.cmd` / `deploy.ps1` / `patch-asar.py` 不再结束任何进程：删除 `--restart` / `-NoRestart`
+  与整套进程枚举、关闭、重启实现（约 7 KB）。
+- 应用在运行时回到明确失败：`patch-asar.py` 退出码 `4`、一个字节都不写；`deploy.ps1` 记为 `FAIL`、
+  整条命令 `exit 1`，提示"完全退出 WorkBuddy（含托盘）后重跑"。
+- **保留**：打完 `--status` 收口（任一补丁非 `patched`、`integ`/`exe sync` 非 `MATCH` 即 `FAIL`）、
+  `uc-seen.py --seed`、`user-context-durable` 补丁、"源 `scripts/` 全覆盖"审计断言、`-Asar` 成功后的重启（`-NoRelaunch` 可关）。
+- 移除 `scripts/test-asar-restart.py`（它验证的就是被删掉的那条链路）。
+- 起因：v1.3.0 的 `close_app` 曾用 `taskkill /IM` 误杀过真实进程；虽然随后改为 pid-only，
+  按用户要求把"主动结束进程"整块去掉。
+
 ## v1.3.0 — 2026-11-21
+
+> 注：本版引入的自动「关闭 → 注入 → 重启」已在 v1.3.1 移除。
 
 主题：**一键"关闭 → 注入 → 重启"，且打完必复核；`user-context` 的"只发一次"真正落盘。**
 
