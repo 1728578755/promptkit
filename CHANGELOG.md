@@ -2,7 +2,30 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
-## v1.3.15 — 2026-11-21
+## v1.3.16 — 2026-11-21
+
+> **补丁（同版本第二次发布）**：上一版 `wb-fix-lite.cmd` 自己就跑不起来。
+>
+> 1. `echo ... (needed ...)` 的括号写在 `if (...)` 块里 → 整个批处理解析失败，
+>    只输出 `... was unexpected at this time.` 就退出。
+> 2. 提权实例丢掉了 `-DryRun` / `-Restore` 参数，且执行完窗口立刻关闭；
+>    于是"只想看看"的调用会真的去写文件，而且看不到任何输出。
+>
+> 现在的行为：
+> - `-DryRun` 不触发 UAC，直接在当前窗口跑完并 `pause`；
+> - 提权实例用 `-NoExit` 启动，**窗口不会关**，参数通过环境变量原样转发；
+> - 不再用 `net session` 判断管理员（Server 服务停用会误判），改用 `whoami /groups`
+>   里的高完整性 SID `S-1-16-12288`；
+> - `wb-fix-lite.ps1` 的 apply / restore 两条写入路径都加了 try/catch，
+>   没权限时只打印"写入失败 + 用 wb-fix-lite.cmd 提权"，不再抛一屏异常。
+>
+> 实测：
+> ```
+> WB_NO_PAUSE=1 cmd /c "scripts\wb-fix-lite.cmd -DryRun"
+>  -> == wb-fix-lite ... ==  install: C:\...  已有轻量补丁（无需重复）  exit=0
+> powershell -File scripts/wb-fix-lite.ps1 -Install "C:\Program Files\WorkBuddy" -Restore
+>  -> 写入失败：…访问被拒绝。 / 需要管理员权限：请用 scripts\wb-fix-lite.cmd（会自动提权）。
+> ```
 
 主题：**一条不依赖 Python / Node / 安装路径 / 代码锚点的修法。**
 

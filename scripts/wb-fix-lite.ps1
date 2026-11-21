@@ -179,8 +179,14 @@ function Invoke-One([string]$path) {
         $back = New-Object byte[] ($origLen - $cut)
         [Array]::Copy($bytes, $cut, $back, 0, $back.Length)
         if (-not $DryRun) {
-            Copy-Item -LiteralPath $path -Destination ($path + ".lite.bak") -Force
-            [IO.File]::WriteAllBytes($path, $back)
+            try {
+                Copy-Item -LiteralPath $path -Destination ($path + ".lite.bak") -Force
+                [IO.File]::WriteAllBytes($path, $back)
+            } catch {
+                Write-Host ("         写入失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
+                Write-Host "         需要管理员权限：请用 scripts\wb-fix-lite.cmd（会自动提权）。" -ForegroundColor Yellow
+                return
+            }
         }
         Write-Host ("         已移除轻量补丁：{0:N0} -> {1:N0} 字节" -f $origLen, $back.Length) -ForegroundColor Green
         return
@@ -198,8 +204,15 @@ function Invoke-One([string]$path) {
     [Array]::Copy($bytes, 0, $out, $prefix.Length, $origLen)
 
     $bak = $path + ".lite.bak"
-    Copy-Item -LiteralPath $path -Destination $bak -Force
-    [IO.File]::WriteAllBytes($path, $out)
+    try {
+        Copy-Item -LiteralPath $path -Destination $bak -Force
+        [IO.File]::WriteAllBytes($path, $out)
+    } catch {
+        Write-Host ("         写入失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host "         这个目录需要管理员权限。请运行 scripts\wb-fix-lite.cmd（会自动提权），" -ForegroundColor Yellow
+        Write-Host "         或右键 PowerShell「以管理员身份运行」后重试。" -ForegroundColor Yellow
+        return
+    }
 
     # 校验：前缀完全一致，且原文一字不差地跟在后面
     $check = [IO.File]::ReadAllBytes($path)
