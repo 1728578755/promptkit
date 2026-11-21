@@ -602,7 +602,7 @@ def main():
     emit("    [5] idle prewarm>0    → 新聊天会复用旧 chunk；deploy 会自动停，也可手动 --apply")
     emit("    [6] 计数>0            → 这些块确实还在发给模型，按上面行号往上查")
     emit("    [7] FAIL              → 磁盘上那份运行时删不掉该块，补丁没生效；")
-    emit("                            可跑 scripts\wb-fix-lite.cmd（免 Python/Node、不依赖锚点）")
+    emit(r"                            可跑 scripts\wb-fix-lite.cmd（免 Python/Node、不依赖锚点）")
     emit("    若 [6][7] 全 PASS 而模型回答里仍有该块：")
     emit("      · 先排除旧聊天（旧会话历史里本来就存着它）——新开一个聊天再看；")
     emit("      · 仍出现则说明块是云端在服务端拼 prompt 时加的，本地删不掉；")

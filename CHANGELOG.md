@@ -2,7 +2,11 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
-## v1.3.16 — 2026-11-21
+## v1.3.17 — 2026-11-21
+
+> 本版只修一处：`doctor.py` 里那条提示字符串不是 raw string，Python 3.12+ 首次运行会打印
+> `SyntaxWarning: invalid escape sequence '\w'`，看起来像报错。已改为 raw string，
+> `python -W error::SyntaxWarning -m py_compile` 通过。
 
 > **补丁（同版本第二次发布）**：上一版 `wb-fix-lite.cmd` 自己就跑不起来。
 >
