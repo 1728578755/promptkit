@@ -1,8 +1,33 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.1.6**（2026-11-17）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.2.0**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
+
+## 发布要求（Release gate）
+
+> **硬要求：公开包必须做到「双击一次，把全部提示词与运行层改造都改到」。** 缺任何一类输入，这个包就是残包，
+> 不允许发布。发版前必须跑 `npm run audit`，输出 `RELEASE OK` 才许打 tag。
+
+| # | 要求 | 机器怎么验 |
+|---|---|---|
+| 1 | **完整性**：部署链路需要的输入全在包里——`welcome-mode/`、`fragments/`、`plugins/`、`runtime-templates/`、`overrides/`、`apply-product-overrides.py`、`patch-asar.py`、`_install.py`、全部渲染与诊断脚本 | `release-audit.js` 逐项检查 9 组共 69 个文件 |
+| 2 | **一致性**：包内提示词与部署链路必须与维护者源目录逐字节相同，不许"包里一份、源里一份" | workspace 模式下逐文件 SHA256 比对 |
+| 3 | **一键全量**：`deploy.cmd` 无参数必须带 `-Elevate`，一次 UAC 写完缓存 + 安装镜像 + `resources\templates\` + `product.json` + `app.asar` | 读 `deploy.cmd` 源码断言 |
+| 4 | **失败可见**：`deploy.cmd` 必须 `exit /b %RC%`，不许让 `pause` 把失败吞成 0 | 同上 |
+| 5 | **CRLF**：`.cmd` 必须是 CRLF，LF 行尾会让 cmd.exe 解析异常 | 数 `\r\n` |
+| 6 | **版本一致**：`package.json` / README 顶部 / CHANGELOG 首条三处相同 | 正则比对 |
+
+维护者流程（在源目录）：
+
+```bash
+node scripts/sync-release.js        # 源 → release/，镜像提示词、运行层输入与部署脚本
+cd release && npm run audit         # 必须输出 RELEASE OK
+cd release && git add -A && git commit && git tag vX.Y.Z && git push origin main --tags
+```
+
+在公开包内（没有上层源目录）跑 `npm run audit` 会自动切成 package 模式：只查完整性与「可一键」，
+因为那时包本身就是源。`sync-release.js` 只允许在源目录跑，防止造出 `release/release/`。
 
 ## 设计原则
 
@@ -24,13 +49,15 @@ PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。
 ## 目录
 
 ```
-welcome-mode/    三份入口模板（通用 / 代码 / 设计）
-fragments/       可复用的公共片段（策略、契约、安全、路由、记忆）
-plugins/         交互模式片段与技能源文件（按运行时布局）
-scripts/         一键部署、渲染、缓存量化与校验脚本
-examples/        示例渲染上下文
-CHANGELOG.md     版本记录
-package.json     nunjucks 依赖与 npm scripts
+welcome-mode/      三份入口模板（通用 / 代码 / 设计）
+fragments/         可复用的公共片段（策略、契约、安全、路由、记忆）
+plugins/           交互模式片段与技能源文件（按运行时布局）
+overrides/         工具描述与技能描述的精简覆盖表（按 name 精确覆盖）
+runtime-templates/ 运行时直接读取的 tpl（user-context / 模式提醒）
+scripts/           一键部署、asar 补丁、渲染、缓存量化与校验脚本
+examples/          示例渲染上下文
+CHANGELOG.md       版本记录
+package.json       nunjucks 依赖与 npm scripts
 ```
 
 模板通过 Nunjucks include 组合片段。本目录保留源布局，放置到运行时时按下面映射：
@@ -41,6 +68,8 @@ package.json     nunjucks 依赖与 npm scripts
 | `fragments/` | `prompt-common/fragments/` |
 | `plugins/**/interactionmode/<mode>/fragments/` | `interactionmode-<mode>/fragments/` |
 | `plugins/**/skills/<name>/` | `skills/<name>/` |
+| `runtime-templates/<name>.tpl` | `<安装目录>/resources/templates/<name>.tpl` |
+| `overrides/tools/*.compact.json` | `<安装目录>/resources/app.asar.unpacked/cli/product.json` 的 `prompts[]` |
 
 模板里的 include 名（`prompt-common/fragments/...`、`interactionmode-*/fragments/...`）以运行时路径为准。
 
@@ -123,8 +152,8 @@ npm run check         # 结构断言：无模板残留、关键段落、模式�
 - `scripts\restore.cmd`：一键恢复，等价于 `deploy.cmd -Restore`，双击即把每个已发现的安装恢复到最近一次备份。
 
 ```bat
-scripts\deploy.cmd                        :: 部署到所有已发现的安装（CN + AI 一起改）
-scripts\deploy.cmd -Elevate               :: 同上，先弹一次 UAC，再写两侧安装镜像
+scripts\deploy.cmd                        :: 双击 = 全量：自动 -Elevate，一次 UAC 写完 缓存 + 安装镜像 + runtime-templates + product.json + app.asar
+scripts\deploy.cmd -Elevate               :: 同上（显式写法；已在管理员上下文时不会二次提权）
 scripts\deploy.cmd -Target workbuddy-ai   :: 只改一套（默认 all）
 scripts\deploy.cmd -ListTargets           :: 列出发现的安装与数据目录
 scripts\deploy.cmd -DryRun                :: 预演，不写文件
@@ -142,6 +171,8 @@ scripts\deploy.cmd -Verify                :: 每个目标的一致性校验（�
 scripts\deploy.cmd -Pull                  :: 每个目标快照到 archive\pulls\
 scripts\deploy.cmd -Asar                  :: 关掉应用后：提权 → 打 app.asar 补丁 → 重启
 scripts\deploy.cmd -AsarRestore           :: 还原 app.asar
+scripts\deploy.cmd -SkipAsarPatch         :: 本次部署不打 asar 补丁
+scripts\deploy.cmd -SkipProductOverrides  :: 本次部署不动 product.json
 ```
 
 一次运行会把**所有发现的安装**都改掉，不需要为每个安装各跑一次。
@@ -177,6 +208,116 @@ scripts\deploy.cmd -AsarRestore           :: 还原 app.asar
 - `-Detailed` 输出完整映射；`-Template` / `-Skill` 只替换单个文件或技能。
 - 脚本里不再有写死的产品目录、数据目录或 PowerShell 路径：`$PSHOME` 起子进程，python 先找目标数据目录下的 `binaries\python\versions`。
 
+## 运行层改造：asar / product.json / runtime-templates
+
+提示词只是第一层。真正进到请求里的还有三处在**模板之外**：打包在 `app.asar` 里的现场拼装代码、
+`product.json` 里的工具描述、以及 `resources\templates\` 下运行时直接读取的 tpl。三处都由同一次
+`scripts\deploy.cmd` 处理，不需要额外步骤（asar 需要先关掉应用）。
+
+### 1. `app.asar` 补丁：7 处等长替换
+
+补丁只做**等长原地替换**，asar 头里的 offset/size 全部不变：
+
+| 补丁 | 去掉的东西 |
+|---|---|
+| `current-time` | 每轮注入的 `<current_time>` 块（内容一直在变，等于每轮让前缀缓存失效） |
+| `user-info` | `<user_info>` 里的 OS / 主题 / `Time:`；Shell 兜底写明 Git Bash |
+| `connector-status` | `<connector-status>` 里三句重连说明 |
+| `project-layout` | `<project_layout>` 的内层标签（保留目录树） |
+| `project-context-once` | `project_context` 回到首轮一次，不再每轮带目录快照 |
+| `scene-chip` | `@scene#…` 场景引用不再序列化进消息文本 |
+| `user-context-once` | `user-context` 首轮一次的判据从进程内存搬到 `localStorage`，`connector-status` 纳入同一判据 |
+
+改 asar 必须同时满足 Electron 的两层完整性校验，否则应用启动即退出：
+
+- **每文件哈希**：asar 头里每个 entry 的 `integrity.hash` / `blocks`，脚本按新内容重算；
+- **整头哈希**：`WorkBuddy*.exe` 里嵌着 `{"file":"resources\\app.asar","alg":"SHA256","value":"…"}` 清单，脚本同步改掉。
+
+内容 + 头哈希 + exe 清单是一个原子操作，任何一步失败三处一起回滚；`--restore` 断言 asar 与 exe 的
+SHA256 都回到改前。**WorkBuddy 升级会同时覆盖 `app.asar` 和 exe，升级后重跑一次。**
+
+```bat
+python scripts\patch-asar.py --status  --asar "<安装目录>\resources\app.asar"   :: 只读体检
+python scripts\patch-asar.py --dry-run --asar "<安装目录>\resources\app.asar"
+scripts\deploy.cmd -Asar                :: 关掉应用后：提权 → 打补丁 → 重启
+scripts\deploy.cmd -AsarRestore         :: 还原
+scripts\deploy.cmd -SkipAsarPatch       :: 本次部署跳过 asar（默认会打）
+```
+
+退出码：`0` 已打好/无需再打，`2` 这个构建里找不到锚点（跳过，不写任何字节），`3` 需要提权，
+`4` 应用正在运行（先退出）。`--asar` 省略时按 `WORKBUDDY_INSTALL` → `scripts\targets.json` 的 `installPath`
+→ 卸载登记项（`DisplayIcon` / `InstallLocation` / `UninstallString`，且目录里必须真有 `WorkBuddy*.exe`）
+的顺序找；都没有就报错，不扫盘、不猜目录。
+
+### 2. `product.json` 工具描述覆盖
+
+`overrides/tools/session-tools.compact.json` 存本次会话高频 18 个工具的精简描述，按 `prompts[].name`
+精确覆盖，其余字段与条目原样保留：**33,422 → 16,727 字节（−50.0%）**。`deploy.ps1` 每次部署都会应用
+（`-SkipProductOverrides` 跳过），写前备份到 `backups/<时间戳>-product-overrides/`。
+
+```bat
+python scripts\apply-product-overrides.py --dry-run --install "<安装目录>"
+python scripts\apply-product-overrides.py --restore          :: 从最近一次备份还原
+python scripts\export-tool-desc.py --set session             :: 导出原文，供改写
+python scripts\tool-desc-map.py --session                    :: 工具 → prompts 键 → 字节
+python scripts\measure-product.py --tools                    :: product.json 各段体积
+python scripts\verify-tool-overrides.py                      :: 断言覆盖表条目齐全、变量无丢失
+npm run overrides                                            :: 渲染覆盖表，断言无残留标签
+```
+
+### 3. 技能描述（`description`）精简
+
+运行时给技能描述的总预算是 8,000 字符，内置技能属于 protected 不截断——31 个内置技能占满预算后，
+非内置技能只会剩一个名字。`overrides/skills/desc-compact.json` 把 31 条 description 压到
+**3,943 字符**，只保留「触发场景 + 一句能力 + 必要边界」，实现细节留在 `SKILL.md` 正文。
+
+```bat
+python scripts\apply-skill-desc.py --dry-run     :: 逐条打印前/后字节与字符
+python scripts\apply-skill-desc.py               :: 改写 plugins\ 下的 SKILL.md（写前备份）
+python scripts\apply-skill-desc.py --restore     :: 还原
+```
+
+它改的是**源文件**，改完要再跑一次 `deploy.cmd` 才能进缓存与安装镜像。
+
+### 4. `runtime-templates/`：运行时直接读的 tpl
+
+`<安装目录>\resources\templates\` 下的 tpl 由宿主在拼 system 时直接读取，不经过 `welcome-mode`。
+本包提供 4 个，目标都是"注入块要么删掉、要么只留一次"：
+
+| 文件 | 处理 | 渲染结果 |
+|---|---|---|
+| `user-context-identity.tpl` | 去掉 `<product_identity>` 与 "The user has provided the following custom instructions" 引导句，保留 `<user_custom_instructions>` 正文 | 561 → 91 字节 |
+| `user-context-expert-identity.tpl` | 同上，无 custom 段 | 0 字节（不再注入） |
+| `craft-mode-reminder.tpl` | 不再注入 `<craft_mode>` | 0 字节 |
+| `ask-mode-reminder.tpl` | 不再注入 `<ask_mode>` | 0 字节 |
+
+```bash
+npm run runtime       # 渲染四个 tpl 并断言注入块已按预期去掉（退出码 1 表示断言不成立）
+```
+
+部署时写入安装目录（`resources\templates\`），需要 `-Elevate`。
+
+### 5. 诊断工具
+
+改完不生效时用它们定位——真实请求只在 `<数据目录>\traces\` 里（只记首轮，第二轮以后的现象只能当场问模型）。
+除 `dump-templates.py`（落盘到 `overrides/_dump/`）与 `slim-mcp-descriptions.py`（写前备份）外，其余不改任何东西：
+
+| 脚本 | 用途 |
+|---|---|
+| `dump-system-prompt.py` | 把最近一次真实请求的 system 落盘，并打印各块的**出现顺序**索引 |
+| `dump-messages.py` | 打印消息序列，逐轮标出四段 user-context（`ICPS` 首轮、`----` 之后）是否出现 |
+| `trace-tokens.py` | 最近几个会话的首轮 / 末轮 `prompt_tokens`，验证注入体积是否真的下降 |
+| `measure-prompt-blocks.py` | 单个 trace 里各注入块的字节与标记出现次数 |
+| `measure-injected.py` | 模拟运行时截断规则，算清单**实际注入**字节（技能预算 8,000） |
+| `measure-injection.py` | 技能 / 子代理 / 延迟工具三张清单的注入体积 |
+| `list-desc.py` | 列出 `skills` / `agents` 的 frontmatter name+description 与体积 |
+| `dump-templates.py` | 把 JSON 里的长 template 逐条拆行落盘，便于逐行读 |
+| `asar-grep.py` | 在 asar 里搜字符串并打印上下文（asar 是拼接包，明文可搜） |
+| `src-context.py` | 在任意文本文件里按锚点取上下文窗口 |
+| `cache-compare.js` | 两份 `cache-prefix.js --json` 的逐项差异，用于核对"只改位置不改内容" |
+| `slim-mcp-descriptions.py` | 精简 MCP 插件里被重复拼接的工具描述常量 |
+| `test-user-context-once.js` | 断言 `user-context-once` 补丁的判据仍在（改完提示词必跑） |
+
 ## 技能
 
 `plugins/` 下的 31 个技能按"触发条件 + 操作流程"组织，包含定时任务、邮件、设计稿验收、团队编排、产品文档查询等工作流。每个技能只在自己的任务出现时加载，不进入每轮常驻上下文。
@@ -187,13 +328,18 @@ scripts\deploy.cmd -AsarRestore           :: 还原 app.asar
 
 ## 不包含
 
-运行时、工具实现、业务代码、备份、归档、开发日志与个人配置。
+运行时本体、工具实现、业务代码、备份（`backups/`）、归档（`archive/`）、渲染产物（`dist/`）、
+开发日志与本机个人配置。`scripts\targets.json` 出厂为空，脚本里没有任何写死的安装目录。
 
-也不包含针对某一台机器的运行时改造（`app.asar` 补丁、`product.json` 工具描述覆盖、`runtime-templates/`）——那些依赖具体安装目录和本机覆盖表，单独维护，不属于提示词框架。
+运行层改造（`app.asar` 补丁、`product.json` 覆盖、`runtime-templates/`）**在包内**，见上文
+[运行层改造](#运行层改造asar--productjson--runtime-templates)——它们只需要安装目录，不需要额外的机器特定输入。
 
 ## 使用
 
-运行 `scripts\deploy.cmd` 即可：脚本自动检测所有安装并写入各自的插件缓存（加 `-Elevate` 同时写安装镜像），不需要手动放置文件、不需要为每个安装各跑一次。只想渲染/校验时用 `npm run render` / `npm run check` / `npm run cache`。
+运行 `scripts\deploy.cmd` 即可：脚本自动检测所有安装并写入各自的插件缓存（加 `-Elevate` 同时写安装镜像与
+`resources\templates\`），随后应用 `product.json` 覆盖、打 `app.asar` 补丁（应用在运行会自动跳过），
+不需要手动放置文件、不需要为每个安装各跑一次。只想渲染/校验时用 `npm run render` / `npm run check` /
+`npm run cache` / `npm run runtime` / `npm run overrides`。
 
 ## License
 

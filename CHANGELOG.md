@@ -2,6 +2,68 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.2.0 — 2026-11-21
+
+主题：**补齐运行层改造——公开版不再"少很多内容"。**
+v1.1.6 及以前只发布提示词与部署脚本，`app.asar` 补丁、`product.json` 工具描述覆盖、`runtime-templates/`
+三块被写在「不包含」里单独维护。这一版把它们全部收进包内，且由同一次 `deploy.cmd` 一起生效。
+
+### 新增内容
+
+| 目录 | 内容 | 规模 |
+|---|---|---:|
+| `scripts/` | 23 个脚本：asar 补丁、product.json 覆盖、技能描述精简、runtime 渲染、trace 诊断 | 23 个文件 |
+| `overrides/tools/` | 18 个高频工具描述的精简版 + 原文基线 | 33,422 → 16,727 字节（−50.0%） |
+| `overrides/skills/` | 31 个内置技能 description 的精简版 + 预算台账 | 3,943 字符（运行时预算 8,000） |
+| `runtime-templates/` | 运行时直接读取的 4 个 tpl（user-context × 2、模式提醒 × 2） | 561 → 91 字节（另 3 个渲染为空） |
+
+- `deploy.ps1` 的两条既有能力（`Invoke-ProductOverrides` / `Invoke-AsarPatch`）此前因缺文件静默跳过，
+  现在文件到位，默认随部署执行；`-SkipProductOverrides` / `-SkipAsarPatch` 可单独关掉。
+- `package.json` 新增 `npm run runtime`（渲染并断言四个 tpl）与 `npm run overrides`（渲染覆盖表）。
+- `README.md` 新增「运行层改造」一节，「不包含」不再把这三块列为不发布。
+
+### 去写死路径（公开包要能直接跑）
+
+- 新增 `scripts/_install.py`：按 `WORKBUDDY_INSTALL` → `scripts\targets.json` 的 `installPath` →
+  卸载登记项（`DisplayIcon` / `InstallLocation` / `UninstallString`，目录里必须真有 `WorkBuddy*.exe`）
+  的顺序解析 `<安装目录>\resources\...`，**不扫盘、不猜目录**；`patch-asar.py` / `asar-grep.py` /
+  `export-tool-desc.py` / `measure-product.py` / `tool-desc-map.py` / `apply-product-overrides.py` 全部改用。
+  注册表过滤是必需的：本机登记的 `D:\Program Files\ZCode` 也有 `resources\app.asar`，只按结构匹配会认错产品。
+- 删掉 `C:\Program Files\WorkBuddy` 与 `D:\Program Files\WorkBuddyAI` 两处硬编码默认值；省略 `--asar`
+  且无任何线索时打印提示并退出码 2（此前会指向一台并不存在的机器）。
+- 修 `apply-product-overrides.py` 注释里的乱码字节（`相对位��` → `相对位置`）。
+
+### 验证（全部 exit=0）
+
+| 命令 | 结果 |
+|---|---|
+| `npm run render` / `npm run check` | 15 份渲染 / ALL CHECKS PASSED |
+| `npm run render-check -- --profile cn` / `--profile ai` | 15 组合 ×2，`removed_blocks=0`，RENDER OK |
+| `npm run cache -- --strict` | 同模式最低 96.19%，STRICT OK |
+| `npm run check-memory` | 四种记忆开关组合全部 OK |
+| `npm run runtime` | RUNTIME RENDER OK（4 个 tpl） |
+| `npm run overrides` | RENDER OK（18 条，无残留标签） |
+| `patch-asar.py --status` | 7 个补丁全 `patched`，`integ: MATCH`，`exe sync: MATCH` |
+| `apply-product-overrides.py --dry-run` | 18 条 16,727 字节，`no change`（本机已应用） |
+| `apply-skill-desc.py --dry-run` | 31 条 3,943 字符 |
+| `verify-tool-overrides.py` | 18 条齐全、变量无丢失、体积均下降 |
+
+### 一键全量 + 发布门槛（同日收尾）
+
+- **`deploy.cmd` 无参数 = 全量**：双击自动带 `-Elevate`，一次 UAC 写完 缓存 + 安装镜像 +
+  `resources\templates\` + `product.json` + `app.asar`；带参数时行为不变。
+  修掉 `pause` 吞退出码：现在结尾是 `exit /b %RC%`，失败不会再显示成成功。`restore.cmd` 同步修。
+- **`patch-asar.py` 的 exe 探测改 `WorkBuddy*.exe`**：国际版主程序是 `WorkBuddyAI.exe`，
+  以前只认 `WorkBuddy.exe`，AI 安装上永远 `exit 1`（exe 清单同步不了 → 应用起不来）。
+- **新增发布门槛**（对应 README「发布要求」一节，机器强制）：
+  - `scripts/release-manifest.js`：公开包"必须有什么"的唯一清单（9 组 69 个文件 + 同步清单）。
+  - `scripts/release-audit.js`：完整性 / 与源逐字节一致 / 一键全量 / 失败可见 / CRLF / 版本三处一致，任一不过 `exit 1`。
+  - `scripts/sync-release.js`：源 → 包镜像（只许在源目录跑），修漂移用。
+  - `package.json` 新增 `npm run audit`。
+  - 自检记录：删掉 `runtime-templates/user-context-identity.tpl` → `BLOCKED: 2 项`（exit 1）；
+    在 `fragments/policy-common.md` 末尾加 1 字节 → `一致性/fragments：内容不同 1`（exit 1）；
+    `node scripts/sync-release.js` 修回（copied 1 / unchanged 207）→ `RELEASE OK`（exit 0）。
+
 ## v1.1.6 — 2026-11-17
 
 主题：**移除三段——`<quality_policy>` / `<agent_loop>` / `<regional_conventions>`。**

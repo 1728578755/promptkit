@@ -1,0 +1,219 @@
+[
+ {
+  "dir": "workbuddy-office-routing",
+  "name": "workbuddy-office-routing",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\workbuddy-office-routing\\SKILL.md",
+  "desc": "Load this Skill before handling local files such as pdf (read / summarize / ask → the `workbuddy-pdf` Skill), doc/docx/dot/wps/wpt, xls/xlsx/xlt/csv/tsv, or ppt/pptx/pps/pot, and before creating a new local document, spreadsheet, or presentation. Load first whenever the user uploads, mentions, previews, reads, edits, or asks to create such a local file, to decide whether to use the PDF Skill, the local office editing Skill, the local spreadsheet agent, the spreadsheet generation Skill, or the PPT Skill (`workbuddy-pptx` for generate / understand / edit). Text-based outputs such as speech scripts, talking points, copywriting, summaries, reports, or meeting minutes should default to local DOCX unless the user explicitly specifies another local format such as markdown or plain text. Other file types are out of scope.",
+  "bytes": 827
+ },
+ {
+  "dir": "workbuddy-local-office-edit",
+  "name": "workbuddy-local-office-edit",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\workbuddy-local-office-edit\\SKILL.md",
+  "desc": "通过本地 editor_sdk 实时读写本机磁盘上的 Office/WPS 类型文件——文件打开后用户在编辑器中实时可见，编辑所见即所得，保存用 save_file 即可、不要主动 close_file。适用于本地 doc/docx/dot/wps/wpt、xls/xlsx/xlt/csv/tsv、ppt/pptx/pps/pot 等文件的打开、编辑、保存与新建；含宏格式可打开但宏不执行，et/ett/dps/dpt 不支持。按 doc/sheet/slide 三类调用对应工具，调用任一编辑工具前先用 edsdk.py schema 查它单个的参数、不要凭摘要猜参数。所有操作经本目录 edsdk.py（python3 edsdk.py list/schema/call）封装，端点自动发现、上层无需关心底层细节。触发词：本地文档、本机 docx/xlsx/pptx/wps、Office/WPS 文件、editor_sdk、edsdk.py、本地编辑、实时编辑。",
+  "bytes": 819
+ },
+ {
+  "dir": "workbuddy-smartsheet",
+  "name": "workbuddy-smartsheet",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\workbuddy-smartsheet\\SKILL.md",
+  "desc": "操作 WorkBuddy 智能表：列举 / 新建 / 重命名 / 删除智能表文档，管理子表、视图、记录、列、公告、评论与仪表盘，按规划文本一次建表建盘，并追加公式列、关联列与查找引用列。当用户提到智能表、多维表、数据表、建一张表、批量录数、加一列、改视图筛选排序、设置表公告或视图公告、评论、回复、@我、未解决、做仪表盘或统计图表，或给出一份 WorkBuddy 智能表文档时使用。工具名均以 `wb_smartsheet.` 开头，只作用于 WorkBuddy 智能表，不操作腾讯文档等其它文档产品的表格。",
+  "bytes": 640
+ },
+ {
+  "dir": "sites",
+  "name": "发布为应用",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\sites\\SKILL.md",
+  "desc": "将生成内容发布为在线链接，或取消发布已上线的应用；也负责为开发完成的微信小程序创建或复用应用卡以供预览（应用卡注册不等于发布）。适合网站、小游戏等交互式内容，支持任意可作为单端口 HTTP 服务运行的项目（静态站点 / PDF / Node.js / Python / Go）。当用户想把本地项目部署、发布、上线、发布小程序、生成分享链接、在云端预览或下线分享链接时使用。",
+  "bytes": 486
+ },
+ {
+  "dir": "wecom-forwarded-chat-resources",
+  "name": "wecom-forwarded-chat-resources",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\wecom-forwarded-chat-resources\\SKILL.md",
+  "desc": "Fetch the online resources listed in a WeCom forwarded-chat archive. Load this Skill whenever the host injects a `<wecom_forwarded_chat_online_resources>` block, or whenever a WeCom / WeChat forwarded-chat transcript contains `[文档]` `[微盘文件]` `[日程]` `[待办]` `[会议]` `[智能纪要]` entries carrying an id. It owns the resource-type routing, the host-managed WeCom authorization wait, and the per-entry fetch accounting. It does not summarize the chat itself.",
+  "bytes": 480
+ },
+ {
+  "dir": "wecom-wedrive-reference",
+  "name": "wecom-wedrive-reference",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\wecom-wedrive-reference\\SKILL.md",
+  "desc": "Fetch the WeCom WeDrive files a user attached as references. Load this Skill whenever the host injects a `<wecom_wedrive_references>` block, or whenever the message carries `@wedrive#<file_id>:\"<name>\"` badges. These attachments have no local copy — only a file id. It owns the host-managed WeCom authorization wait and the per-file fetch accounting, and delegates retrieval to the current account’s WeCom skill (the disk reference in `wecom-unified`, or `wecomcli-disk`).",
+  "bytes": 476
+ },
+ {
+  "dir": "miora-creative-core",
+  "name": "miora-creative-core",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\miora-creative-core\\SKILL.md",
+  "desc": "创意媒体生成的通用底座。当交付物是 AI 生成的图片或视频时使用——覆盖意图识别与场景判定、输入与参数契约、生成前确认与费用边界、生成工具路由、失败处理、产物引用、落到 Miora 画布交付与交付验证。本 skill 不能单独覆盖任一交付物类型，始终与匹配的领域 skill（miora-brand-design / miora-image-generation / miora-video-generation）配对使用。",
+  "bytes": 452
+ },
+ {
+  "dir": "expert-manager",
+  "name": "expert-manager",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\expert-manager\\SKILL.md",
+  "desc": "专家包的全生命周期运营：转化(从开源仓库/本地项目创建专家包)、修改已有专家、合规检查、批量更新、质量审查。\n触发词：创建专家、转化专家、转成专家、生成专家包、导入专家、convert expert、修改专家、编辑专家、更新专家、modify expert、检查专家、审查专家包、专家合规、专家运营、expert ops。",
+  "bytes": 401
+ },
+ {
+  "dir": "miora-brand-design",
+  "name": "miora-brand-design",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\miora-brand-design\\SKILL.md",
+  "desc": "品牌视觉设计的决策层。当交付物是品牌资产时使用——Logo、品牌吉祥物 / IP 角色、品牌 VI 全案、IP 物料延展。负责品牌信息采集、需求范围识别，以及以 Logo 为锚点的一致性约束。不负责工具路由、确认或失败处理（那些在 miora-creative-core），也不做通用图片生成（那在 miora-image-generation）。",
+  "bytes": 390
+ },
+ {
+  "dir": "cloud-service",
+  "name": "cloud-service",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\cloud-service\\SKILL.md",
+  "desc": "网站或小程序需要后端、服务端或数据库时的托管方案（对标 Supabase）：云数据库、文件存储、用户认证（邮箱、手机短信验证码、微信和 WorkBuddy 账号登录）、免密钥大模型调用。应用要存数据、登录注册、传文件、调 AI 或明确要求云服务时使用。询问用户后端或数据库选型时列为推荐选项",
+  "bytes": 387
+ },
+ {
+  "dir": "library",
+  "name": "library",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\library\\SKILL.md",
+  "desc": "Route here (资料库/知识库/网盘/空间) when users create, generate, beautify, upload, edit, share, organize (整理/归档/理一理), publish, download, export (导出/下载), search or retrieve HTML pages (工作台/看板/收集表/汇报页), docs (文档/周报/笔记), tables/CSV, drive files, web links(剪藏/回读), images, attachments or audio transcripts.",
+  "bytes": 377
+ },
+ {
+  "dir": "workbuddy-finance-skill",
+  "name": "workbuddy-finance-skill",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\workbuddy-finance-skill\\SKILL.md",
+  "desc": "金融/投资/股票/基金/ETF/板块/指数/宏观/外汇/大宗商品/财报/估值/持仓/交易/量化/选股/期权/衍生品/投行建模/技术指标/行情等——金融场景总入口，优先级高于其他金融skill。涉及任一上述领域和相关金融场景时（包括字面未明说但本质相关），都务必**第一时间优先加载本skill**。",
+  "bytes": 373
+ },
+ {
+  "dir": "geo-map-compliance-guard",
+  "name": "geo-map-compliance-guard",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\geo-map-compliance-guard\\SKILL.md",
+  "desc": "ALWAYS TRIGGER map compliance skill for any map generation, visualization, routing, or location service request to enforce strict China map data compliance rules, including approved data-source whitelist, key safety controls, territorial integrity requirements, privacy protection, and Tencent Maps GL JS scenario-based integration guidelines.",
+  "bytes": 343
+ },
+ {
+  "dir": "visualizer",
+  "name": "visualizer",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\visualizer\\SKILL.md",
+  "desc": "把解释变成内联图表/示意图/交互组件（不是文件）：用 widget_guidelines 取设计规则、show_widget 渲染。当用户说「画一下/可视化/图表/示意图/讲解/对比/架构/流程/状态机」，或给出一个视觉产物的名词短语（如「REST vs GraphQL 对比表」「订单状态机」）时使用。",
+  "bytes": 342
+ },
+ {
+  "dir": "mini-program-development",
+  "name": "mini-program-development",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\mini-program-development\\SKILL.md",
+  "desc": "在 WorkBuddy 内创建、修改、预览和托管发布微信小程序。适用于静态小程序，或需要数据库、登录、文件、LLM 等云服务的小程序；发布、上线、小程序码和小程序代码问题也使用此 Skill；需要微信开发者工具编译、模拟器、真机预览或真机调试时同样使用。",
+  "bytes": 339
+ },
+ {
+  "dir": "miora-image-generation",
+  "name": "miora-image-generation",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\miora-image-generation\\SKILL.md",
+  "desc": "图片生成与编辑的决策层。当交付物是静态图片时使用——覆盖 prompt 构建、比例与尺寸映射、参考图使用、系列一致性锚点链、数量纪律，以及电商详情图等具体场景。品牌类需求（Logo、吉祥物、VI 全案、IP 物料）在 miora-brand-design。",
+  "bytes": 310
+ },
+ {
+  "dir": "wecom-media-upload",
+  "name": "wecom-media-upload",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\wecom-media-upload\\SKILL.md",
+  "desc": "通过 A2ASendMessage 给企业微信聊天 Agent 发送本地文件（文件/图片/语音/视频）前，必须先用本 Skill 上传到企业微信 third_aibot 媒体库，再把上传返回的 media_url 放进 attachments，作为独立的文件 part 与文本一起发送。",
+  "bytes": 279
+ },
+ {
+  "dir": "workbuddy-pdf",
+  "name": "workbuddy-pdf",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\workbuddy-pdf\\SKILL.md",
+  "desc": "Read, summarize, search, and understand PDFs with the local workbuddy-pdf CLI. Use for PDF questions, text/table/image extraction, and checking scans, charts, or formulas against page images. Reading only — creating or editing PDF files is not supported.",
+  "bytes": 256
+ },
+ {
+  "dir": "recommend-experts",
+  "name": "recommend-experts",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\recommend-experts\\SKILL.md",
+  "desc": "When a task needs professional judgment, deep research, a specialist role, or multi-role collaboration and no Expert is selected in the current session, search for real Experts or Expert Teams and recommend them with an inline card.",
+  "bytes": 232
+ },
+ {
+  "dir": "skill-creator",
+  "name": "skill-creator",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\skill-creator\\SKILL.md",
+  "desc": "Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends CodeBuddy's capabilities with specialized knowledge, workflows, or tool integrations.",
+  "bytes": 229
+ },
+ {
+  "dir": "mcp-setup",
+  "name": "mcp-setup",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\mcp-setup\\SKILL.md",
+  "desc": "配置/新增/修改 MCP server（~/.workbuddy/mcp.json）时使用：按 provider 官方字段写 command/args/env/headers/url，合并 mcpServers 而不覆盖，写凭据，并提示用户在连接器管理里 Trust。",
+  "bytes": 220
+ },
+ {
+  "dir": "recommend-connectors",
+  "name": "recommend-connectors",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\recommend-connectors\\SKILL.md",
+  "desc": "When a user task requires an external app, service, API, MCP server, authorization, or third-party data and no connected tool covers it, search for real Connectors and recommend them with an inline card.",
+  "bytes": 203
+ },
+ {
+  "dir": "team-orchestration",
+  "name": "team-orchestration",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\team-orchestration\\SKILL.md",
+  "desc": "复杂任务要多角色并行、拆给多个 agent、或要实时查看/管理团队状态时使用；走团队面板 TeamCreate → SendMessage → TeamDelete，而不是零散子代理。",
+  "bytes": 190
+ },
+ {
+  "dir": "marketplace-skill-installer",
+  "name": "marketplace-skill-installer",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\marketplace-skill-installer\\SKILL.md",
+  "desc": "在 WorkBuddy 对话中通过一句话搜索并安装 Skill。\n触发词：安装 skill、安装技能、install skill、添加技能、装个 X 技能、帮我安装 X、search skill。",
+  "bytes": 186
+ },
+ {
+  "dir": "ardot-canvas-verify",
+  "name": "ardot-canvas-verify",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\ardot-canvas-verify\\SKILL.md",
+  "desc": "设计稿/画布视觉验收：改完截图、截屏、看效果、检查、对比前后时使用；capture_screenshot → ViewImage → 清理临时文件，含 includeSchema 规则。",
+  "bytes": 185
+ },
+ {
+  "dir": "agent-mail",
+  "name": "agent-mail",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\agent-mail\\SKILL.md",
+  "desc": "收发/查看/搜索邮件、写草稿、抄送、处理邮件附件时使用；email/inbox/reply 触发；邮件工具是 deferred 的，先 ToolSearch 再 DeferExecuteTool。",
+  "bytes": 176
+ },
+ {
+  "dir": "workbuddy-docs",
+  "name": "workbuddy-docs",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\workbuddy-docs\\SKILL.md",
+  "desc": "问 WorkBuddy 自身功能怎么用/怎么配置（MCP、hooks、slash commands、设置项、快捷键）时使用；先 WebFetch 官方文档再回答，不猜 UI 路径。",
+  "bytes": 174
+ },
+ {
+  "dir": "miora-video-generation",
+  "name": "miora-video-generation",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\miora-video-generation\\SKILL.md",
+  "desc": "视频生成的决策层。当交付物是会动的内容时使用——覆盖镜头与运动描述、时长与画幅、主体一致性、失败处置与跨轮次。",
+  "bytes": 165
+ },
+ {
+  "dir": "buddy-multimodal-generation",
+  "name": "buddy-multimodal-generation",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\buddy-multimodal-generation\\SKILL.md",
+  "desc": "Generate 3D models or apply template-based image-to-video effects. Use ImageGen for image generation and VideoGen for general video generation.",
+  "bytes": 143
+ },
+ {
+  "dir": "buddy-image-processing",
+  "name": "buddy-image-processing",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\buddy-image-processing\\SKILL.md",
+  "desc": "Process existing images with text and watermark removal, general enhancement, portrait beautification, image restoration, and general matting.",
+  "bytes": 142
+ },
+ {
+  "dir": "automation-setup",
+  "name": "automation-setup",
+  "file": "E:\\workbuddyspace\\WorkBuddy-system-prompts\\plugins\\workbuddy-builtin\\skills\\automation-setup\\SKILL.md",
+  "desc": "定时/重复任务、提醒、日程、推迟/改期/暂停/删除自动化时使用；schedule/reminder/cron 触发。",
+  "bytes": 120
+ }
+]

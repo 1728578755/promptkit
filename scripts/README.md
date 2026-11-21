@@ -80,6 +80,49 @@ so re-run `deploy.cmd -Elevate` after every upgrade.
 - Existing files are backed up to `backups/<timestamp>/` (manifest records `target`); every copy is verified with SHA256.
 - `-Detailed` prints the full mapping; `-SkipVerify` skips the consistency check; `-Template` / `-Skill` target one file or one skill.
 
+## Runtime layer: asar, product.json, runtime-templates
+
+Three things reach the request without going through a Nunjucks template. A deploy handles all three.
+
+**`app.asar` patches** (`patch-asar.py`, 7 equal-length replacements): `current-time`, `user-info`,
+`connector-status`, `project-layout`, `project-context-once`, `scene-chip`, `user-context-once`.
+Electron validates the archive twice — a per-file `integrity.hash`/`blocks` in the asar header, and a
+`{"file":"resources\\app.asar","alg":"SHA256","value":"…"}` manifest embedded in `WorkBuddy*.exe`.
+The script rewrites content, entry hash and exe manifest as one atomic operation and rolls all three back
+if any step fails.
+
+```bat
+python scripts\patch-asar.py --status  --asar "<install>\resources\app.asar"
+python scripts\patch-asar.py --dry-run --asar "<install>\resources\app.asar"
+scripts\deploy.cmd -Asar           :: app must be closed; elevates, patches, relaunches
+scripts\deploy.cmd -AsarRestore
+scripts\deploy.cmd -SkipAsarPatch
+```
+
+Exit codes: `0` patched / already patched, `2` anchors not found for this build (nothing written),
+`3` needs elevation, `4` app is running. When `--asar` is omitted the path comes from
+`WORKBUDDY_INSTALL`, a pinned `installPath` in `targets.json`, or the uninstall registry
+(`DisplayIcon` / `InstallLocation` / `UninstallString`, and the folder must really hold
+`WorkBuddy*.exe`); nothing is guessed and the disk is never walked.
+
+**`product.json` overrides** (`apply-product-overrides.py`): `overrides/tools/session-tools.compact.json`
+replaces 18 high-frequency tool descriptions by exact `prompts[].name`, 33,422 → 16,727 bytes (−50.0%).
+Applied on every deploy (`-SkipProductOverrides` to opt out), backed up to
+`backups/<timestamp>-product-overrides/`; `--restore` puts it back.
+
+**Skill descriptions** (`apply-skill-desc.py`): `overrides/skills/desc-compact.json` rewrites the
+frontmatter `description` of 31 builtin skills down to 3,943 characters (the runtime budget is 8,000 and
+builtin skills are protected). It edits the **source** `plugins/**/SKILL.md`, so re-deploy afterwards.
+
+**`runtime-templates/`** (`render-runtime-templates.js`, `npm run runtime`): the four tpl the host reads
+directly from `<install>\resources\templates\`. They strip `<product_identity>`, the custom-instruction
+lead-in and the per-turn mode reminders; the script asserts each one renders as expected.
+
+Diagnostics that never write: `dump-system-prompt.py`, `dump-messages.py`, `trace-tokens.py`,
+`measure-prompt-blocks.py`, `measure-injected.py`, `measure-injection.py`, `list-desc.py`,
+`asar-grep.py`, `cache-compare.js`, `src-context.py`, `verify-tool-overrides.py`, `measure-product.py`,
+`tool-desc-map.py`, `export-tool-desc.py`, `test-user-context-once.js`.
+
 ## Verify
 
 ```bat
@@ -129,7 +172,17 @@ turn the gate on with `--mode-threshold N`.
 
 ## Files
 
-- `deploy.cmd` / `restore.cmd` — the two double-click entries; `restore.cmd` is a wrapper over `deploy.ps1 -Restore`.
+- `deploy.cmd` / `restore.cmd` — the two double-click entries. **No arguments = full write**: `deploy.cmd` adds
+  `-Elevate` for you (one UAC) so cache + install mirror + `resources\templates\` + `product.json` + `app.asar`
+  are all written in one go; with arguments it forwards them unchanged. Both scripts end with `exit /b %RC%`,
+  so a failed run can no longer look like a successful one.
+- `release-manifest.js` — the single list of what a releasable package must contain (9 groups, 69 files) plus the
+  byte-sync lists used by the two scripts below. Add a new required input here, nowhere else.
+- `release-audit.js` — the release gate (`npm run audit`): completeness, byte equality with the maintainer source,
+  one-click full write (`-Elevate` + `exit /b` + CRLF), and the version string in `package.json` / README / CHANGELOG.
+  Any failure exits 1. Runs in `package` mode when there is no parent source tree.
+- `sync-release.js` — mirrors the source tree into `release/` (prompts, runtime-layer inputs, deploy scripts).
+  Refuses to run inside the package itself, so it can never create `release/release/`.
 - `deploy.ps1` — dispatcher: target discovery, one-shot elevation, then
   deploy / `-Restore` / `-Verify` / `-Pull` / `-Asar` / `-AsarRestore` for every target.
 - `target.ps1` / `targets.json` — installation discovery, data-dir pairing, multi-target resolution, optional path pins.
@@ -142,3 +195,15 @@ turn the gate on with `--mode-threshold N`.
 - `render-check.js` — same render from the project layout, with edition profiles; `--root` renders any layout.
 - `cache-prefix.js` — prefix-cache retention per change scenario (LCP), optional `--strict` gate.
 - `check-memory-blocks.js` — memory-block shape for the four `CloudMemoryPlatformEnabled` × `WorkspaceMemoryDisabled` combinations.
+- `patch-asar.py` — the 7 asar patches, two-layer integrity, atomic apply/restore, `--status`.
+- `apply-product-overrides.py` — merge `overrides/tools/*.compact.json` into `product.json`; `--restore`.
+- `apply-skill-desc.py` — compress skill frontmatter `description` from `overrides/skills/desc-compact.json`.
+- `render-runtime-templates.js` — render `runtime-templates/` and assert the injected blocks are gone.
+- `render-tool-overrides.js` — render every override template against a realistic context.
+- `verify-tool-overrides.py` — assert the override table keeps every entry and every variable.
+- `export-tool-desc.py` / `tool-desc-map.py` / `measure-product.py` — export, map and size `product.json`.
+- `_install.py` — shared resolver for `<install>\resources\...` (env → `targets.json` → error); imported by the python tools.
+- `dump-system-prompt.py` / `dump-messages.py` / `trace-tokens.py` / `measure-prompt-blocks.py` /
+  `measure-injected.py` / `measure-injection.py` / `list-desc.py` / `asar-grep.py` / `cache-compare.js` /
+  `src-context.py` / `slim-mcp-descriptions.py` / `test-user-context-once.js` — read-only diagnostics
+  (the last one asserts the `user-context-once` patch is intact).
