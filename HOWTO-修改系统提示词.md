@@ -25,6 +25,11 @@
 > 以及五段 + `<current_time>` + `<additional_data>`。`deploy.cmd -CliPatch` 一次 UAC，不需要关应用；
 > 默认全量 deploy 也会在 asar 之前跑它。凡是会写盘的动作（`deploy` / `-CliPatch` / `-Asar` / `-AsarRestore` / `-Restore`）结束时若应用没运行会自动拉起，失败也拉起；只读动作与 `-DryRun` 不拉起；**从不杀进程**。
 > 已打开的旧聊天需要新开聊天或重启应用才能加载新 chunk。
+>
+> **v1.3.5 修正**：v1 的消息判据要求 `type:"message"`，真实请求里只有 `role`，于是历史 user-context
+> 从未被删；数组 content 清理后也没置 `changed`，结果被丢弃。v2 两处都修了，并且每套安装各打自己的
+> chunk（AI 版此前一直没打）。`--status` 现在显示 `version:`，看到 `version: 1` 说明还是旧补丁，
+> 跑一次 `deploy.cmd -CliPatch` 即升级。
 
 ---
 

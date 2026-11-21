@@ -491,11 +491,21 @@ function Invoke-CliPatchTarget($profile) {
         $result.Status = "FAIL"
         return $result
     }
+    # 每个安装有自己的运行时 chunk：不传 --file 就会都用脚本里的默认 CN 路径，
+    # AI 版永远打不到（实测 D:\Program Files\WorkBuddyAI 下有一份未打的 1849.*.mjs）。
+    $chunkDir = Join-Path $profile.InstallPath "resources\app.asar.unpacked\cli\dist\lazy-lite-wb"
+    $chunks = @(Get-ChildItem -LiteralPath $chunkDir -Filter "1849.*.mjs" -ErrorAction SilentlyContinue)
+    if ($chunks.Count -eq 0) {
+        Add-Note $result "cli runtime chunk not found (this build)"
+        $result.Status = "SKIP"
+        return $result
+    }
+    $chunkGlob = Join-Path $chunkDir "1849.*.mjs"
     $prevIo = $env:PYTHONIOENCODING
     $env:PYTHONIOENCODING = "utf-8"
     $out = @()
     try {
-        $cliArgs = @("-X", "utf8", $script, "--apply")
+        $cliArgs = @("-X", "utf8", $script, "--apply", "--file", $chunkGlob)
         if ($DryRun) { $cliArgs += "--dry-run" }
         $out = @(& $py @cliArgs 2>&1 | ForEach-Object { [string]$_ })
         $code = $LASTEXITCODE
@@ -508,7 +518,7 @@ function Invoke-CliPatchTarget($profile) {
         $result.Status = "FAIL"
         return $result
     }
-    $st = @(& $py -X utf8 $script --status 2>&1 | ForEach-Object { [string]$_ })
+    $st = @(& $py -X utf8 $script --status --file $chunkGlob 2>&1 | ForEach-Object { [string]$_ })
     if (@($st | Where-Object { $_ -match '^status:\s+PATCHED' }).Count -eq 0) {
         Add-Note $result "cli patch did not verify"
         $result.Status = "FAIL"

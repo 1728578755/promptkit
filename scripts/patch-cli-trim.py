@@ -53,9 +53,12 @@ BACKUPS = os.path.join(ROOT, "backups")
 DEFAULT_GLOB = r"C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\dist\lazy-lite-wb\1849.*.mjs"
 
 MARK = "__wbStripLegacyString"
+TRIM_VERSION = 2
+HELPER_BEGIN = "/*__wbTrimV2*/"
+HELPER_END = "/*__wbTrimEnd*/"
 ANCHOR = b'export const __rspack_esm_ids=["1849"];'
 
-HELPER = r'''
+HELPER = r'''/*__wbTrimV2*/
 function __wbStripLegacyString(s){
   if(typeof s!=="string")return s;
   const tags=["tool_usage_policy","result_presentation","final_answer_instructions","task_management","agent_skills","quality_policy","agent_loop","regional_conventions"];
@@ -85,7 +88,10 @@ function __wbTextOf(it){
   if(Array.isArray(c))return c.filter(p=>p&&(p.type==="text"||p.type==="input_text")&&typeof p.text==="string").map(p=>p.text).join("\n");
   return "";
 }
-function __wbIsUser(it){return !!it&&it.type==="message"&&it.role==="user"}
+// 真实 input 元素是 {"role":"user","content":[{"type":"text","text":"..."}]}，
+// 没有 type:"message"。v1 要求 type==="message"，于是把每条消息都当成"非消息"原样透传，
+// 历史 user-context 从来没有被删掉过——用户看到的"每轮重发"就是它。
+function __wbIsUser(it){return !!it&&it.role==="user"}
 function __wbIsReminderOnly(it){
   if(!__wbIsUser(it))return false;
   const t=__wbTextOf(it);
@@ -108,7 +114,9 @@ function __wbCleanMessage(it,keepUserContext){
         let t=__wbStripLegacyString(p.text);
         if(!keepUserContext)t=__wbStripUserContext(t);
         t=t.trim();
-        if(t){parts.push(t===p.text?p:{...p,text:t})}else{changed=true}
+        if(!t){changed=true;continue;}
+        if(t!==p.text){changed=true;parts.push({...p,text:t});}
+        else parts.push(p);
       }else{parts.push(p)}
     }
     if(parts.length===0)return null;
@@ -119,21 +127,22 @@ function __wbCleanMessage(it,keepUserContext){
 function __wbCleanRuntimeInput(input){
   if(!Array.isArray(input))return input;
   const real=[];
-  for(let i=0;i<input.length;i++)if(__wbIsUser(input[i])&&!__wbIsReminderOnly(input[i]))real.push(i);
+  for(let i=0;i<input.length;i++){
+    const it=input[i];
+    if(!__wbIsUser(it))continue;
+    if(!__wbIsReminderOnly(it))real.push(i);
+  }
   const lastReal=real.length?real[real.length-1]:-1;
   const firstTurn=real.length<=1;
   const out=[];
   for(let i=0;i<input.length;i++){
     const it=input[i];
-    if(!__wbIsUser(it)){
-      if(it&&typeof it==="object"&&it.type==="message"){
-        const x=__wbCleanMessage(it,it.role==="user");
-        if(x)out.push(x);
-      }else out.push(it);
-      continue;
-    }
+    // 只改注入进 user 消息的内容。assistant / tool 的历史原样保留：
+    // 模型自己讨论这些标签时，正文不能被当成注入物删掉。
+    if(!__wbIsUser(it)){out.push(it);continue;}
+    // 纯提醒消息（没有 <user_query>）在任何位置都是注入物，直接丢
+    if(__wbIsReminderOnly(it))continue;
     if(!firstTurn&&i<lastReal){
-      if(__wbIsReminderOnly(it))continue;
       const x=__wbCleanMessage(it,false);
       if(x)out.push(x);
       continue;
@@ -143,7 +152,7 @@ function __wbCleanRuntimeInput(input){
   }
   return out;
 }
-'''.strip()
+/*__wbTrimEnd*/'''.strip()
 
 
 def sha256(b):
@@ -212,12 +221,39 @@ def patch(data):
     return data, log
 
 
+def version_of(data):
+    """0 = 原始；1 = v1（判据错误，历史 user-context 从未被删）；2 = 当前版本。"""
+    if HELPER_BEGIN.encode() in data:
+        return TRIM_VERSION
+    if MARK.encode() in data:
+        return 1
+    return 0
+
+
 def is_patched(data):
     return (
-        MARK.encode() in data
+        version_of(data) == TRIM_VERSION
         and data.count(b"systemInstructions:__wbStripLegacyAny(") == 2
         and data.count(b"input:__wbCleanRuntimeInput(") == 2
     )
+
+
+def earliest_backup(path):
+    """同一目标的备份里最早的那份就是原始 chunk（v1 升级 v2 时用它回到干净状态）。"""
+    if not os.path.isdir(BACKUPS):
+        return None
+    cands = []
+    for f in os.listdir(BACKUPS):
+        fp = os.path.join(BACKUPS, f)
+        if f.endswith(".json") or not os.path.isfile(fp):
+            continue
+        try:
+            meta = json.load(open(fp + ".json", encoding="utf-8"))
+        except Exception:
+            meta = {}
+        if meta.get("source") == path:
+            cands.append((os.path.getmtime(fp), fp))
+    return sorted(cands)[0][1] if cands else None
 
 
 def backup(path, tag):
@@ -235,24 +271,39 @@ def self_test():
     if not node:
         print("[FAIL] node not found")
         return 2
-    sample = '''<tool_usage_policy>AAA</tool_usage_policy>
-<system-reminder data-role="user-context">
-<user_info>U</user_info>
-</system-reminder>
-<user_query>hello</user_query>'''
-    js = HELPER + "\n" + (
-        "const a=[{type:'message',role:'user',content:" + json.dumps(sample) + "},"
-        "{type:'message',role:'assistant',content:'ok'},"
-        "{type:'message',role:'user',content:'second'}];\n"
-        "const out=__wbCleanRuntimeInput(a);\n"
-        "const txt=JSON.stringify(out);\n"
-        "if(txt.includes('tool_usage_policy'))throw new Error('legacy tag kept');\n"
-        "if(txt.includes('user-context'))throw new Error('historical user-context kept');\n"
-        "if(!txt.includes('hello')||!txt.includes('second'))throw new Error('real query lost');\n"
-        "const one=[{type:'message',role:'user',content:" + json.dumps(sample) + "}];\n"
-        "if(!JSON.stringify(__wbCleanRuntimeInput(one)).includes('user_info'))throw new Error('first turn lost context');\n"
-        "console.log('SELF TEST OK');\n"
+    # 真实 input 元素的形状是 {"role":"user","content":[{"type":"text","text":"..."}]}，
+    # 没有 type:"message"。v1 的 self-test 用的是 {type:"message",role:"user"}，
+    # 所以测试一直绿，真实请求却每条消息都被当成"非消息"原样透传。
+    first_turn = (
+        '<system-reminder data-role="user-context">\n<user_info>U</user_info>\n</system-reminder>\n'
+        "<tool_usage_policy>AAA</tool_usage_policy>\n<user_query>hello</user_query>"
     )
+    second_turn = (
+        '<system-reminder data-role="additional-data">\n<panel_tabs>x</panel_tabs>\n</system-reminder>\n'
+        "<user_query>second</user_query>"
+    )
+    reminder_only = '<system-reminder data-role="hook">tick</system-reminder>'
+    lines = [
+        "const mk=(t)=>({role:'user',content:[{type:'text',text:t}]});",
+        "const asst={role:'assistant',content:[{type:'text',text:'<current_time>keep me</current_time>'}]};",
+        "const two=[mk(%s),asst,mk(%s)];" % (json.dumps(first_turn), json.dumps(second_turn)),
+        "const t=JSON.stringify(__wbCleanRuntimeInput(two));",
+        "if(t.includes('user-context'))throw new Error('historical user-context kept');",
+        "if(t.includes('tool_usage_policy'))throw new Error('legacy tag kept');",
+        "if(!t.includes('hello')||!t.includes('second'))throw new Error('real query lost');",
+        "if(!t.includes('panel_tabs'))throw new Error('current turn additional-data lost');",
+        "if(!t.includes('keep me'))throw new Error('assistant history was rewritten');",
+        "const one=[mk(%s)];" % json.dumps(first_turn),
+        "if(!JSON.stringify(__wbCleanRuntimeInput(one)).includes('user_info'))throw new Error('first turn lost context');",
+        "const four=[mk(%s),asst,mk(%s),mk(%s)];" % (
+            json.dumps(first_turn), json.dumps(second_turn), json.dumps(reminder_only)),
+        "const o4=__wbCleanRuntimeInput(four);",
+        "if(o4.length!==3)throw new Error('reminder-only message should be dropped, got '+o4.length);",
+        "const sys=__wbStripLegacyAny('<current_time>now</current_time><user_query>x</user_query>');",
+        "if(sys.includes('current_time'))throw new Error('system current_time kept');",
+        "console.log('SELF TEST OK');",
+    ]
+    js = HELPER + "\n" + "\n".join(lines) + "\n"
     tmp = os.path.join(ROOT, "tmp-helper-test.mjs")
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(js)
@@ -292,6 +343,7 @@ def main():
         print("sha256: %s" % sha256(data))
         if args.status:
             ok = is_patched(data)
+            print("version: %d (expected %d)" % (version_of(data), TRIM_VERSION))
             print("status: %s" % ("PATCHED" if ok else "NOT PATCHED"))
             rc = 0 if ok else 1
             continue
@@ -324,8 +376,24 @@ def main():
             continue
 
         if is_patched(data):
-            print("status: already patched; nothing to do")
+            print("status: already patched (v%d); nothing to do" % TRIM_VERSION)
             continue
+
+        ver = version_of(data)
+        if ver == 1:
+            # v1 的判据是错的（历史 user-context 从来没被删），不能叠加，先回到原始 chunk 再打
+            src = earliest_backup(path)
+            if not src:
+                print("[FAIL] v1 patch found but no backup to roll back; run --restore first")
+                rc = 2
+                continue
+            print("upgrade: v1 -> v%d (restore %s first)" % (TRIM_VERSION, src))
+            if args.dry_run:
+                print("[dry-run] would restore the original chunk, then patch it")
+                continue
+            data = read(src)
+            print("bytes:  %d (restored original)" % len(data))
+
         new_data, log = patch(data)
         for name, st in log:
             print("  %-24s %s" % (name, st))

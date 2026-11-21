@@ -2,6 +2,64 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.5 — 2026-11-21
+
+主题：**v1.3.4 的运行时清理有三个缺陷，历史 user-context 其实从未被删过；全部修好。**
+
+用户原话：「release 版本system-reminder仍然一堆东西都每轮重发，current_time去掉反复说也没实现，脚本结束要自动拉起」。
+
+### 为什么 v1.3.4 看起来"改了但没生效"
+
+1. **消息判据写错**。`__wbIsUser` 要求 `it.type==="message" && it.role==="user"`，但真实 input 元素是
+   `{"role":"user","content":[{"type":"text","text":"..."}]}` —— **没有 `type` 字段**。
+   于是"真实用户消息"数组恒为空、`firstTurn` 恒为 `true`，每条 user 消息都走"首轮保留"分支：
+   历史 `<system-reminder data-role="user-context">` **一次都没有被删过**。
+   自检没抓到，是因为 v1 的 self-test 用 `{type:'message',role:'user',...}` 构造数据——测的是假设的形状，
+   不是真实形状。
+2. **`changed` 标记漏设**。`__wbCleanMessage` 处理数组 content 时，只有"整段被删空"才置
+   `changed=true`；普通文本被改短时不置。函数最后 `return changed ? {...it} : it` 于是把清理结果整个丢掉。
+   **即使判据改对，这条也会让清理无效**——两个 bug 必须一起修。
+3. **AI 版从来没打过**。`deploy.ps1` 调 `patch-cli-trim.py --apply` 时没传 `--file`，
+   脚本内置默认路径是 CN 的 `C:\Program Files\WorkBuddy\...`；`D:\Program Files\WorkBuddyAI` 下那份
+   `1849.d105c1cb.mjs`（247,364 B）一直是原始文件。
+
+### 改了什么
+
+- `scripts/patch-cli-trim.py` 升到 **v2**：
+  - `__wbIsUser` 只看 `role==="user"`，不再要求 `type`；
+  - 数组 content 的文本一被改动就置 `changed=true`；
+  - 纯提醒消息（不含 `<user_query>`）在**任何位置**都丢弃；
+  - assistant / tool 的历史**不再触碰**——模型自己讨论这些标签时，正文不能被当成注入物删掉。
+- **版本标记**：helper 用 `/*__wbTrimV2*/ … /*__wbTrimEnd*/` 包起来，`--status` 输出 `version:`；
+  检测到 v1 时**先从最早备份还原原始 chunk 再打**，不叠加、不猜测。
+- `scripts/deploy.ps1`：`Invoke-CliPatchTarget` 与 `--status` 都传 `--file <该安装>\resources\
+  app.asar.unpacked\cli\dist\lazy-lite-wb\1849.*.mjs`，两套安装各打自己的；
+  找不到 chunk 的构建记 `SKIP`（不判失败），避免老版本直接红。
+- **自检重写**：用真实形状（`{role:"user",content:[{type:"text",text}]}`）构造，覆盖
+  历史删除 / 首轮保留 / assistant 不被改写 / reminder-only 丢弃 / system 里的 `current_time`。
+
+### 证据
+
+重新注入缺陷，自检立刻红（先证红）：
+
+| 回退哪一处 | 结果 |
+|---|---|
+| `__wbIsUser` 改回要求 `type==="message"` | `Error: historical user-context kept`，exit 1 |
+| `changed` 标记改回只在删空时置 | Node 抛错，exit 1 |
+| 用真实结构跑 v1 helper | `contains_user_context=true`，exit 1 |
+
+修复后：
+
+- `python scripts/patch-cli-trim.py --self-test` → `SELF TEST OK`
+- 最小用例：`"<tool_usage_policy>A</tool_usage_policy>x<system-reminder data-role=\"user-context\">q</system-reminder>y"` → `"xy"`
+- 两个安装的 chunk：`version: 2`、`status: PATCHED`、sha256 同为 `f9f8b0945c5ea25135a38242f321c03f6be586ac6269c37054c603129df80033`
+- CN 250,670 → 251,167 字节；AI 247,364 → 251,167 字节（同一份实现）
+
+### 生效条件（重要）
+
+chunk 是 Node 进程启动时读进内存的。**已经打开的聊天不会热加载**——需要新开一个聊天，或完全退出后重开应用。
+脚本按用户要求**从不结束进程**，所以这一步只能手动。
+
 ## v1.3.4 — 2026-11-21
 
 主题：**旧会话不再重放 user-context / 五段；部署脚本结束时自动拉起。**

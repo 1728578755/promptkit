@@ -42,6 +42,11 @@ scripts\deploy.cmd -AsarRestore
 with one summary table and a non-zero exit code if any target failed.
 
 `patch-cli-trim.py` targets `<install>\resources\app.asar.unpacked\cli\dist\lazy-lite-wb\1849.*.mjs`.
+Since v1.3.5 it is **v2**: the user-message predicate only checks `role==="user"` (the real element shape is
+`{"role":"user","content":[{"type":"text","text":"…"}]}` — no `type:"message"`), the array-content path sets
+`changed` whenever a text part is rewritten, reminder-only messages are dropped anywhere, and assistant/tool
+history is left untouched. `--status` prints `version:`; `deploy.ps1` passes `--file` per installation, so the
+AI edition gets its own chunk patched instead of silently hitting the CN path.
 It keeps the first turn's user-context, strips historical user-context/reminder-only messages on later turns,
 and removes the five removed prompt blocks plus `<current_time>` / `<additional_data>` from the system prompt
 before the provider call. It is idempotent, backs up the chunk, and rolls back if `node --check` fails.

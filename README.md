@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.4**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.5**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -104,6 +104,12 @@ package.json       nunjucks 依赖与 npm scripts
 > 第一轮保留 user-context；后续轮次从历史里整块删除；系统提示同时删五段 +
 > `<current_time>` + `<additional_data>`。`deploy.cmd -CliPatch` 一次 UAC 即可，不需要关应用；需要立刻让新聊天用上新 chunk 时跑 `python scripts/refresh-cli-prewarm.py --apply`（只停 `kind=prewarm` + `status=idle`，不碰主程序/当前聊天）。
 > 默认全量 deploy 也会在 asar 之前跑它。
+>
+> **v1.3.5 修正（v1 实际没生效）**：v1 判据要求消息带 `type:"message"`，而真实元素只有 `role`，
+> 于是"真实用户消息"恒为空、每条都按首轮保留，历史 user-context 一次都没删过；
+> 另外数组 content 清理后 `changed` 没置位，清理结果被整个丢掉。v2 两处都修了，
+> 并且 `deploy.ps1` 给每套安装分别传 `--file`——AI 版此前一直在打 CN 的路径，自己那份从未被改。
+> `--status` 现在输出 `version:`，`deploy` 见到 v1 会先从最早备份还原再重打。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。
