@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.8**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.9**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -129,6 +129,13 @@ package.json       nunjucks 依赖与 npm scripts
 > 并写 `reports/verify-latest.txt`。**只有 PASS 才算部署成功。**
 > `--self-test` 也加入了用户原样 182 字符消息（`data-role="additional-data"` + `<current_time>` + `<user_query>`）
 > 的断言：清理后必须只剩 `<user_query>…</user_query>`。
+>
+> **v1.3.9 追加（诊断）**：`scripts\doctor.cmd`（只读、免管理员）逐项打印：
+> 缓存模板每个版本、CLI chunk 的 `bytes/version/mtime` 与三个锚点命中数、asar 九个补丁逐条、
+> 每个进程的启动时间与补丁时间对比、idle prewarm 数、最新 trace 的逐块计数，
+> 并把**磁盘上那份 chunk 里的清理函数抽出来**拿原样块跑一遍（`INSTALLED HELPER OK`）。
+> 结论只有三选一：`EFFECTIVE` / `UNPROVEN`（还没有补丁后的新请求）/ `NOT EFFECTIVE: <哪层、什么现象>`，
+> 报告写到 `reports\doctor-latest.txt`。`deploy` 结束时的验收也改成调用它。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。

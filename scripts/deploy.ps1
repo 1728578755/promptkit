@@ -538,6 +538,41 @@ function Invoke-CliPatchTarget($profile) {
     return $result
 }
 
+function Wait-ForAppClose($profiles) {
+    # asar 只有应用完全退出才能写。这里不杀进程，只提示并等最多 60 秒；
+    # 直接按回车 / 输入被重定向（自动化）就立刻继续，只打 CLI 层——模型边界本来就靠 CLI 层。
+    $names = @()
+    foreach ($p in $profiles) {
+        if (-not $p.Installed) { continue }
+        $exe = $p.ExeName
+        if (-not $exe) { continue }
+        $n = [IO.Path]::GetFileNameWithoutExtension($exe)
+        if ($n) { $names += $n }
+    }
+    $names = @($names | Select-Object -Unique)
+    $running = @()
+    foreach ($n in $names) {
+        if (@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $running += $n }
+    }
+    if ($running.Count -eq 0) { return }
+    if ([Console]::IsInputRedirected) {
+        Write-Host ("WorkBuddy is running ({0}); asar will be skipped, CLI layer still applied." -f ($running -join ", ")) -ForegroundColor Yellow
+        return
+    }
+    Write-Host ""
+    Write-Host ("检测到正在运行：{0}" -f ($running -join ", ")) -ForegroundColor Yellow
+    Write-Host "asar 层需要应用完全退出（含托盘）。退出后回到这里按回车；直接回车=只打 CLI 层（模型边界已足够）。" -ForegroundColor Yellow
+    for ($i = 0; $i -lt 120; $i++) {
+        if ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true); return }
+        $alive = $false
+        foreach ($n in $running) {
+            if (@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $alive = $true }
+        }
+        if (-not $alive) { Write-Host "应用已退出，继续写 asar。" -ForegroundColor Green; return }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Start-WorkBuddyIfClosed($profiles) {
     # 「脚本结束要自动拉起」的唯一落点：所有写盘动作结束时都走这里。
     # 只启动，从不结束进程；-NoRelaunch 关掉。
@@ -584,18 +619,24 @@ function Invoke-StackVerify($profiles) {
     $dir = Split-Path -Parent $report
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $prev = $env:PYTHONIOENCODING
+    $prevEnc = [Console]::OutputEncoding
     $env:PYTHONIOENCODING = "utf-8"
     try {
+        # PowerShell 5.1 抓原生命令 stdout 用的是控制台编码；不切成 UTF-8，
+        # 报告里的中文结论会变成乱码，用户就更没法判断了。
+        try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
         $out = @(& $py -X utf8 $script 2>&1 | ForEach-Object { [string]$_ })
         $code = $LASTEXITCODE
     } finally {
+        try { [Console]::OutputEncoding = $prevEnc } catch { }
         if ($null -eq $prev) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prev }
     }
     foreach ($line in $out) {
         $color = "Gray"
-        if ($line -match '^RESULT\s*:\s*PASS') { $color = "Green" }
-        elseif ($line -match '^RESULT\s*:\s*FAIL') { $color = "Red" }
-        elseif ($line -match 'RAW$') { $color = "Red" }
+        if ($line -match '^RESULT\s*:\s*PASS' -or $line -match '^结论\s*:\s*EFFECTIVE') { $color = "Green" }
+        elseif ($line -match '^RESULT\s*:\s*FAIL' -or $line -match '^结论\s*:\s*(NOT EFFECTIVE|UNPROVEN)') { $color = "Red" }
+        elseif ($line -match 'RAW$' -or $line -match 'FAIL' -or $line -match 'MISSING') { $color = "Red" }
+        elseif ($line -match 'WARN') { $color = "Yellow" }
         Write-Host $line -ForegroundColor $color
     }
     try { Set-Content -LiteralPath $report -Value $out -Encoding UTF8 } catch { }
@@ -626,6 +667,10 @@ if ($action -eq "deploy") {
     Assert-SkillSources
     $scope = if ($Template -or $Source -or $Skill) { "selected" } else { "all files" }
     Write-Host ("   scope={0}; install mirror={1}; cache=write" -f $scope, $(if ($isAdmin -and -not $NoInstall) { "write" } else { "skip (-Elevate to write)" })) -ForegroundColor DarkGray
+}
+
+if (($action -eq "deploy") -and (-not $SkipAsarPatch) -and (-not $DryRun)) {
+    Wait-ForAppClose $profiles
 }
 
 $results = @()

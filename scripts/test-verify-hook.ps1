@@ -42,9 +42,13 @@ if ($code -ne 0) { $problems += "exit code $code (expected 0)" }
 if (-not (Test-Path -LiteralPath $report)) { $problems += "report not written: $report" }
 else {
     $text = Get-Content -LiteralPath $report -Raw
-    if ($text -notmatch 'RESULT\s*:\s*(PASS|FAIL)') { $problems += "report has no RESULT line" }
+    if ($text -notmatch '(RESULT|结论)\s*:') { $problems += "report has no verdict line" }
+    if ($text -notmatch '(EFFECTIVE|UNPROVEN)') { $problems += "report has no verdict value" }
+    if ($text -match '锟|缁|鍘|�') { $problems += "report is mojibake" }
     if ($text -notmatch 'version=3') { $problems += "report has no cli version=3" }
     if ($text -notmatch 'current-time-cloud') { $problems += "report has no asar patch list" }
+    if ($text -notmatch '\[7\]') { $problems += "report has no installed-helper section" }
+    if ($text -notmatch 'INSTALLED HELPER OK') { $problems += "installed helper was not proven" }
 }
 
 if ($problems.Count -gt 0) {

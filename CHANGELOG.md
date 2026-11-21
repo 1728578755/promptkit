@@ -2,6 +2,45 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.9 — 2026-11-21
+
+主题：**一条 `doctor` 命令把每一项都打出来——包括"应该存在却没有"的项，并直接说为什么没生效。**
+
+### 上一版的问题
+
+v1.3.8 的验收只打印"找到并打好的东西"。某个补丁没打上、某个块还在发给模型时，
+报告里根本不出现这一行，于是只能说"还是有问题"，无法定位。
+
+### 改了什么
+
+- 新增 `scripts/doctor.py` + `scripts/doctor.cmd`（**只读，不需要管理员**，随时可跑）：
+  1. 提示词模板：每个缓存插件版本各一行，逐个数八个被删的块；
+  2. CLI 运行时：按内容找 chunk，打印 `bytes / version / mtime` 与三个锚点的实际命中数；
+  3. `app.asar`：9 个补丁逐条 `patched / raw`，外加 integrity / exe 清单；
+  4. 进程：每个 `WorkBuddy.exe` / `codebuddy` 的启动时间与补丁时间比较，
+     早于补丁的直接标 `WARN → 仍加载旧 chunk`；
+  5. prewarm 池：idle 数量，>0 说明新聊天会复用旧代码；
+  6. 最新 trace：逐块计数（`<current_time`、`additional-data`、`user-context`、八个块……）；
+  7. **已安装运行时自检**：把磁盘上那份 chunk 里的 helper 抽出来，拿用户原样
+     182 字符块跑一遍，输出 `INSTALLED HELPER OK` / 残留内容；
+  8. 判读规则：每条异常该往哪查，以及"全 PASS 但模型仍打印该块"时的两种真实来路。
+- 结论固定为三选一并带原因：`EFFECTIVE` / `UNPROVEN`（还没有补丁后的新请求）/
+  `NOT EFFECTIVE: <哪一层、什么现象>`；报告写 `reports/doctor-latest.txt`。
+- `verify-stack.py` 变为兼容入口，直接转调 `doctor.py`（实现只有一份）。
+- `deploy.cmd` 结束时的验收改为调用 doctor，并修了中文结论在 PowerShell 5.1 里
+  变成乱码的问题（调用前把 `[Console]::OutputEncoding` 切到 UTF-8）。
+- `UNPROVEN` 不再算失败（它只是"还没有新请求可以证明"）；只有 `NOT EFFECTIVE` 才非 0。
+- `test-verify-hook.ps1` 增加断言：报告必须含 `EFFECTIVE/UNPROVEN`、`version=3`、
+  asar 补丁列表、`[7]` 段与 `INSTALLED HELPER OK`，且不得是乱码。
+
+### 在另一台电脑上（只读诊断，先跑这个）
+
+```bat
+scripts\doctor.cmd
+```
+
+把最后 15 行（含 `结论` / `原因`）发回来即可定位，不需要重启、不需要管理员。
+
 ## v1.3.8 — 2026-11-21
 
 主题：**在“另一台电脑”上真正打上补丁 —— 不再按文件名找 chunk，部署结束自动逐层验收。**

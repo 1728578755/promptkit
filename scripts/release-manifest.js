@@ -54,10 +54,9 @@ const REQUIRED = {
     "scripts/patch-asar.py",
     "scripts/patch-cli-trim.py",
     "scripts/refresh-cli-prewarm.py",
-  "scripts/verify-stack.py",
-  "scripts/test-verify-hook.ps1",
     "scripts/verify-stack.py",
-  "scripts/test-verify-hook.ps1",
+    "scripts/doctor.py",
+    "scripts/doctor.cmd",
     "scripts/test-verify-hook.ps1",
     "scripts/_install.py",
   ],
@@ -114,6 +113,8 @@ const SYNC_DIRS = ["welcome-mode", "fragments", "plugins", "runtime-templates", 
 
 // 与源逐字节同步的单文件：部署链路 + 诊断脚本（这两棵树里必须一模一样）
 const SYNC_FILES = [
+  "scripts/doctor.py",
+  "scripts/doctor.cmd",
   // 部署链路
   "scripts/deploy.cmd",
   "scripts/deploy.ps1",

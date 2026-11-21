@@ -9,3 +9,4 @@ archive/
 # python bytecode must never ship
 __pycache__/
 *.pyc
+reports/
