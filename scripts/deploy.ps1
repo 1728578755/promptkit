@@ -302,6 +302,7 @@ function Invoke-UcSeenSeed($profile, $result) {
 
 function Invoke-DeployTarget($profile) {
     Set-TargetEnv $profile
+    Set-WorkBuddyPython $profile
     $result = New-Result $profile.Name $profile.Label "deploy"
     if (-not $profile.Installed -and -not $profile.ConfigExists) {
         Add-Note $result "not installed"
@@ -328,6 +329,20 @@ function Invoke-DeployTarget($profile) {
 
     $code = Invoke-Child $applyArgs
     if ($code -ne 0) { throw "apply.ps1 failed for $($profile.Name) (exit $code)" }
+
+    # 缓存层收口：空缓存 = 什么都没写进去（新电脑最常见），必须报出来而不是打印 OK。
+    if (-not $NoPluginCache -and -not $DryRun) {
+        $cs = Get-CacheTemplateStats $profile
+        if (-not $cs.Exists -or $cs.Files -eq 0) {
+            Add-Note $result ("plugin cache empty ({0}) - start WorkBuddy once, enter any mode, quit completely (tray), then rerun" -f $cs.Root)
+            $result.Status = "FAIL"
+        } elseif ($cs.Hits -gt 0) {
+            Add-Note $result ("cache templates still carry {0} removed-block hit(s)" -f $cs.Hits)
+            $result.Status = "FAIL"
+        } else {
+            Add-Note $result ("cache templates trimmed: {0} files, removed_hits=0" -f $cs.Files)
+        }
+    }
 
     Invoke-ProductOverrides $profile $result
     if (-not $SkipCliPatch) {
@@ -476,6 +491,7 @@ function Invoke-AsarTarget($profile, [string]$mode) {
 
 
 function Invoke-CliPatchTarget($profile) {
+    Set-WorkBuddyPython $profile
     Set-TargetEnv $profile
     $result = New-Result $profile.Name $profile.Label "cli-patch"
     if (-not $profile.Installed) { Add-Note $result "not installed"; return $result }
@@ -536,6 +552,39 @@ function Invoke-CliPatchTarget($profile) {
     $result.Status = "OK"
     Add-Note $result "model boundary trimmed; open a NEW chat to load it"
     return $result
+}
+
+function Set-WorkBuddyPython($profile) {
+    # 新电脑常常没有系统 Python；WorkBuddy 自带一个，install 目录里就有，
+    # 优先用它，避免 deploy 因为 "python not found" 直接跳过所有补丁。
+    if ($env:WORKBUDDY_PYTHON) { return }
+    if (-not $profile.InstallPath) { return }
+    foreach ($rel in @("resources\vendor\python\python.exe",
+                       "resources\app.asar.unpacked\resources\vendor\python\python.exe")) {
+        $p = Join-Path $profile.InstallPath $rel
+        if (Test-Path -LiteralPath $p) {
+            $env:WORKBUDDY_PYTHON = $p
+            Write-Host ("python: {0} (bundled with WorkBuddy)" -f $p) -ForegroundColor DarkGray
+            return
+        }
+    }
+}
+
+function Get-CacheTemplateStats($profile) {
+    # 缓存模板是"是否真的生效"的第一层证据：文件数 + 八个被删块的出现次数。
+    $root = Join-Path $profile.ConfigDir "plugins\cache\workbuddy-builtin"
+    $stats = [pscustomobject]@{ Root = $root; Exists = $false; Files = 0; Hits = 0 }
+    if (-not (Test-Path -LiteralPath $root)) { return $stats }
+    $stats.Exists = $true
+    $tags = @("tool_usage_policy", "result_presentation", "final_answer_instructions",
+              "task_management", "agent_skills", "quality_policy", "agent_loop", "regional_conventions")
+    $files = @(Get-ChildItem -LiteralPath $root -Filter prompt.tpl -Recurse -Depth 3 -ErrorAction SilentlyContinue)
+    $stats.Files = $files.Count
+    foreach ($f in $files) {
+        $text = [IO.File]::ReadAllText($f.FullName)
+        foreach ($tag in $tags) { $stats.Hits += ([regex]::Matches($text, "<" + $tag)).Count }
+    }
+    return $stats
 }
 
 function Wait-ForAppClose($profiles) {

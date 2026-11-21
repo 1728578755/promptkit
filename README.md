@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.11**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.12**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -152,6 +152,15 @@ package.json       nunjucks 依赖与 npm scripts
 > 没有 Python 时 `doctor.cmd` 自动转用 `doctor-basic.ps1`（纯 PowerShell），
 > 同样会指出每套安装缺哪个标记。另修一个误报：`user_info` / `user-context` /
 > `connector-status` 是首轮一次性上下文，不该按"必须 0"判定。
+>
+> **v1.3.12 追加（按诊断报告修）**：`doctor` 不再一套安装拖垮全局——先判定"当前在用"
+> （进程路径，或最新 trace 对应的配置目录），只有它失败才算 `NOT EFFECTIVE`，
+> 其余给 `EFFECTIVE/PARTIAL` 并注明，deploy 也不会再因为另一套安装报红。
+> `target.ps1` 补上开始菜单快捷方式与有界磁盘扫描，绿色版/便携版也能被 `deploy.cmd` 发现。
+> `doctor-basic.ps1` 补上模板缓存检查与 `.workbuddy-ai`。`deploy` 收口会读真实缓存：
+> 空缓存（新电脑冷启动）或模板里仍有被删块 → **硬失败**并提示先启动一次客户端。
+> 没有系统 Python 时优先用安装自带的 `resources\vendor\python\python.exe`。
+> CLI 补丁不再假设 chunk id `1849` 与混淆变量 `g`/`w`，改为按语句前缀和调用点现场发现。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。

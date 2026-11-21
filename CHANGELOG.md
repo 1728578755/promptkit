@@ -2,6 +2,32 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.12 — 2026-11-21
+
+主题：**按 `DIAGNOSIS-NEW-ENVIRONMENT.md` 逐条修。**
+
+| 诊断条目 | 原来 | 现在 |
+|---|---|---|
+| §3.1 多安装一票否决 | 任一安装没打全 → 全局 `NOT EFFECTIVE`、exit 1；deploy 末尾跟着报 `1 target(s) failed` | 先判定"当前在用"（有进程看进程路径，没进程看最新 trace 对应的配置目录），**只有当前在用的安装失败才算 FAIL**；其余记 `EFFECTIVE` + 提示，或本机无进程时给 `PARTIAL`，都不再 exit 1 |
+| §3.2 target.ps1 裂脑 | 只认 App Paths / 卸载注册表 / 运行进程 | 补上**开始菜单与桌面快捷方式** + **有界磁盘扫描**，与 `_install.py` 的发现范围对齐（绿色版/便携版也能被 deploy 发现） |
+| §3.3 doctor-basic 盲区 | 只认 `.workbuddy`；不查模板缓存 | 同时检查 `.workbuddy` 与 `.workbuddy-ai`；新增模板层：按插件版本列出 `prompt.tpl` 数量与八个被删块命中数 |
+| §3.4 反斜杠警告 | `_install.py` 里拼接 PowerShell 字符串触发 `SyntaxWarning` | 改用 `.NET` 已知文件夹取值，彻底不拼引号/反斜杠；`-W error::SyntaxWarning` 验证 |
+| §4.1 缓存冷启动静默 0 | 缓存目录为空时 `apply.ps1` 返回 0 个目标，deploy 仍打印 OK | deploy 收口读真实缓存：`files=0` → **FAIL** 并提示"先启动一次客户端、进任意模式、完全退出（含托盘）再重跑"；`removed_hits>0` 也 FAIL；正常则打印 `cache templates trimmed: N files` |
+| §4.2 Python 依赖 | 没有系统 Python 就直接跳过所有补丁 | 优先用安装自带的 `resources\vendor\python\python.exe`（实测 3.13.14），已内置到 CLI/asar/apply 三条路径 |
+| §4.4 Chunk ID / 变量硬编码 | `ANCHOR = export const __rspack_esm_ids=["1849"];` + 写死 `g` / `w` | 锚点只认语句前缀 `export const __rspack_esm_ids=[`；变量名从 `systemInstructions:X.modelInput.instructions,` 与 `input:X.modelInput.input,` 现场发现。已用改名 chunk（`9999.aaa.mjs`）和改名变量（`Q`/`R`）实测通过 |
+| 判定口径 | `is_patched` 数"打了几处"，换个构建就误判 | 改为看"还有没有没包上的调用点"（正则残留为 0） |
+
+### 验证
+
+```
+python scripts/patch-cli-trim.py --self-test                -> SELF TEST OK
+python scripts/doctor.py                                    -> 结论 EFFECTIVE（另有 1 套未打全、不影响使用），exit 0
+powershell -File scripts/doctor-basic.ps1                   -> 两个配置目录的模板 removed_hits=0
+powershell -File scripts/test-verify-hook.ps1               -> VERIFY HOOK OK（含冷启动 0 文件断言）
+powershell -File scripts/deploy.ps1 -DryRun                 -> exit 0
+改名 chunk 9999.aaa.mjs + 变量 Q/R                           -> 253,385 字节、PATCHED、node --check OK
+```
+
 ## v1.3.11 — 2026-11-21
 
 主题：**把写死的机器路径全部拆掉；没有 Python 也能诊断。**

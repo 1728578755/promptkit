@@ -55,5 +55,31 @@ if ($problems.Count -gt 0) {
     foreach ($p in $problems) { Write-Host ("FAIL: " + $p) -ForegroundColor Red }
     exit 1
 }
+# --- 缓存层判定（新电脑冷启动时必须是 FAIL，不能打印 OK） ---
+$m2 = [regex]::Match($src, 'function Get-CacheTemplateStats\(\$profile\) \{[\s\S]*?\r?\n\}')
+if (-not $m2.Success) {
+    Write-Host "FAIL: Get-CacheTemplateStats not found in deploy.ps1" -ForegroundColor Red
+    exit 1
+}
+Invoke-Expression $m2.Value
+
+$emptyCfg = Join-Path $env:TEMP ("wb-empty-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $emptyCfg -Force | Out-Null
+try {
+    $s = Get-CacheTemplateStats ([pscustomobject]@{ ConfigDir = $emptyCfg })
+    if ($s.Files -ne 0) { $problems += "empty config should report 0 prompt.tpl" }
+} finally {
+    Remove-Item -LiteralPath $emptyCfg -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$real = Get-CacheTemplateStats ([pscustomobject]@{ ConfigDir = (Join-Path $env:USERPROFILE ".workbuddy") })
+if ($real.Files -lt 1) { $problems += "real config reported 0 prompt.tpl" }
+if ($real.Hits -ne 0) { $problems += ("real config still has removed-block hits: " + $real.Hits) }
+
+if ($problems.Count -gt 0) {
+    foreach ($p in $problems) { Write-Host ("FAIL: " + $p) -ForegroundColor Red }
+    exit 1
+}
+
 Write-Host "VERIFY HOOK OK" -ForegroundColor Green
 exit 0

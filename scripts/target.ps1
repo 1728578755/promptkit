@@ -149,6 +149,48 @@ function Get-InstallCandidates {
             }
     } catch { }
 
+    # 4) 开始菜单 / 桌面快捷方式 —— 安装器没登记时最可靠的线索
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $lnkDirs = @(
+            (Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs"),
+            (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"),
+            [Environment]::GetFolderPath("Desktop"),
+            [Environment]::GetFolderPath("CommonDesktopDirectory")
+        )
+        foreach ($d in $lnkDirs) {
+            if (-not (Test-Path -LiteralPath $d)) { continue }
+            Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    try {
+                        $t = $shell.CreateShortcut($_.FullName).TargetPath
+                        if ($t -like "*WorkBuddy*.exe") { & $add (Split-Path $t -Parent) }
+                    } catch { }
+                }
+        }
+    } catch { }
+
+    # 5) 有界扫描 —— 绿色版/便携版/拷贝版没有注册表项，只能在常见位置找名字像 WorkBuddy 的目录
+    foreach ($letter in @("C", "D", "E", "F", "G", "H")) {
+        $drive = "${letter}:\"
+        if (-not (Test-Path -LiteralPath $drive)) { continue }
+        $bases = @("Program Files", "Program Files (x86)", "Apps", "Programs", "Software") |
+            ForEach-Object { Join-Path $drive $_ }
+        $users = Join-Path $drive "Users"
+        if (Test-Path -LiteralPath $users) {
+            Get-ChildItem -LiteralPath $users -Directory -ErrorAction SilentlyContinue |
+                Select-Object -First 20 | ForEach-Object {
+                    $bases += (Join-Path $_.FullName "AppData\Local\Programs")
+                }
+        }
+        foreach ($b in $bases) {
+            if (-not (Test-Path -LiteralPath $b)) { continue }
+            Get-ChildItem -LiteralPath $b -Directory -Recurse -Depth 1 -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "*WorkBuddy*" } |
+                ForEach-Object { & $add $_.FullName }
+        }
+    }
+
     $seen = @{}
     $result = @()
     foreach ($c in $candidates) {

@@ -45,6 +45,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,7 +84,8 @@ function __wbScrubFetch(){
 }
 __wbScrubFetch();
 /*__wbTrimScrubEnd*/'''
-ANCHOR = b'export const __rspack_esm_ids=["1849"];'
+# 只认语句开头，不认具体的 chunk id：别的构建可能是 1850/其他数字。
+ANCHOR_PREFIX = b"export const __rspack_esm_ids=["
 
 HELPER = r'''/*__wbTrimV3*/
 function __wbStripLegacyString(s){
@@ -321,12 +323,29 @@ def replace_once(data, old, new, label):
     return data.replace(old, new, 1), "patched"
 
 
+RE_INS_RAW = re.compile(rb"systemInstructions:(?!__wbStripLegacyAny\()[A-Za-z$_][\w$]*\.modelInput\.instructions,")
+RE_IN_RAW = re.compile(rb"input:(?!__wbCleanRuntimeInput\()[A-Za-z$_][\w$]*\.modelInput\.input,")
+
+
+def _anchor_of(data):
+    """定位模块头的 rspack id 语句，按语句边界取，不写死 id。"""
+    i = data.find(ANCHOR_PREFIX)
+    if i < 0:
+        return None
+    j = data.find(b";", i)
+    if j < 0:
+        return None
+    return data[i:j + 1]
+
+
 def patch(data):
     log = []
     if MARK.encode() not in data:
-        if ANCHOR not in data:
-            raise SystemExit("[FAIL] module header anchor not found")
-        data = data.replace(ANCHOR, ANCHOR + HELPER.encode() + SCRUB.encode(), 1)
+        anchor = _anchor_of(data)
+        if not anchor:
+            raise SystemExit("[FAIL] module header anchor not found "
+                             "(no 'export const __rspack_esm_ids=[' statement)")
+        data = data.replace(anchor, anchor + HELPER.encode() + SCRUB.encode(), 1)
         log.append(("helper", "patched"))
     else:
         # 已经打过补丁的 chunk 里，helper 是**旧版本**的代码。只加新东西不够：
@@ -347,16 +366,25 @@ def patch(data):
         else:
             log.append(("fetch-scrub", "already"))
 
-    for kind, var in (("non-stream", "g"), ("stream", "w")):
-        old = ("systemInstructions:%s.modelInput.instructions," % var).encode()
-        new = ("systemInstructions:__wbStripLegacyAny(%s.modelInput.instructions)," % var).encode()
-        data, st = replace_once(data, old, new, "%s instructions" % kind)
-        log.append(("%s-instructions" % kind, st))
+    # 变量名（压缩后常是 g/w/a…）不写死：从调用点自己发现。
+    # 每个 provider 分支各有一处 systemInstructions / input。
+    ins_vars = sorted(set(re.findall(rb"systemInstructions:([A-Za-z$_][\w$]*)\.modelInput\.instructions,", data)))
+    in_vars = sorted(set(re.findall(rb"input:([A-Za-z$_][\w$]*)\.modelInput\.input,", data)))
+    if not ins_vars:
+        raise SystemExit("[FAIL] no 'systemInstructions:X.modelInput.instructions,' found")
+    if not in_vars:
+        raise SystemExit("[FAIL] no 'input:X.modelInput.input,' found")
 
-        old = ("input:%s.modelInput.input," % var).encode()
-        new = ("input:__wbCleanRuntimeInput(%s.modelInput.input)," % var).encode()
-        data, st = replace_once(data, old, new, "%s input" % kind)
-        log.append(("%s-input" % kind, st))
+    for var in ins_vars:
+        old = b"systemInstructions:" + var + b".modelInput.instructions,"
+        new = b"systemInstructions:__wbStripLegacyAny(" + var + b".modelInput.instructions),"
+        data, st = replace_once(data, old, new, "instructions(%s)" % var.decode("ascii", "replace"))
+        log.append(("instructions:%s" % var.decode("ascii", "replace"), st))
+    for var in in_vars:
+        old = b"input:" + var + b".modelInput.input,"
+        new = b"input:__wbCleanRuntimeInput(" + var + b".modelInput.input),"
+        data, st = replace_once(data, old, new, "input(%s)" % var.decode("ascii", "replace"))
+        log.append(("input:%s" % var.decode("ascii", "replace"), st))
     return data, log
 
 
@@ -370,11 +398,13 @@ def version_of(data):
 
 
 def is_patched(data):
+    # 不数"打了几处"（不同构建的分支数不同），改看"还有没有没包上的调用点"。
     return (
         version_of(data) == TRIM_VERSION
-        and data.count(b"systemInstructions:__wbStripLegacyAny(") == 2
-        and data.count(b"input:__wbCleanRuntimeInput(") == 2
-        # 出口清理与结构扫描是这一层的关键；缺了就算没打全（老 v3 只有正则版）。
+        and not RE_INS_RAW.search(data)
+        and not RE_IN_RAW.search(data)
+        and data.count(b"__wbStripLegacyAny(") >= 1
+        and data.count(b"__wbCleanRuntimeInput(") >= 1
         and data.count(b"__wbScrubFetch") >= 2
         and b"__wbBlank" in data
         and b"__wbDropReminder" in data

@@ -26,6 +26,7 @@ import datetime as _dt
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -47,12 +48,9 @@ ALLOW_ONCE = [
     'data-role="user-context"', "<additional_data", "<user_info",
     "<connector-status",
 ]
-CLI_ANCHORS = [
-    ("helper", "__wbStripLegacyString", 1),
-    ("instructions", "systemInstructions:__wbStripLegacyAny(", 2),
-    ("input", "input:__wbCleanRuntimeInput(", 2),
-    ("fetch-scrub", "__wbScrubFetch", 2),
-]
+# 不看"打了几处"：不同构建的分支数不同。看"还有没有没包上的调用点"。
+RE_INS_RAW = re.compile(rb"systemInstructions:(?!__wbStripLegacyAny\()[A-Za-z$_][\w$]*\.modelInput\.instructions,")
+RE_IN_RAW = re.compile(rb"input:(?!__wbCleanRuntimeInput\()[A-Za-z$_][\w$]*\.modelInput\.input,")
 
 PASS, FAIL, WARN, SKIP, MISSING = "PASS", "FAIL", "WARN", "SKIP", "MISSING"
 
@@ -101,6 +99,22 @@ def config_dirs():
 
 
 # ------------------------------------------------------------------ layers
+def pair_config(install_root, cfgs):
+    """安装 -> 它使用的配置目录（CN 用 .workbuddy，国际版用 .workbuddy-ai）。"""
+    endpoint = ""
+    try:
+        pj = os.path.join(install_root, "resources", "app.asar.unpacked", "cli", "product.json")
+        with open(pj, encoding="utf-8", errors="replace") as fh:
+            endpoint = (json.load(fh).get("endpoint") or "").lower()
+    except Exception:
+        pass
+    want = ".workbuddy-ai" if "workbuddy.ai" in endpoint else ".workbuddy"
+    for c in cfgs:
+        if os.path.basename(c).lower() == want:
+            return c
+    return ""
+
+
 def layer_templates(cfg_dirs):
     rows = []
     for cfg in cfg_dirs:
@@ -162,6 +176,40 @@ def find_chunks(root):
     return unpacked, sorted(hits)
 
 
+def cli_state(path):
+    """一个 chunk 的补丁状态：raw=没包上的调用点数量。"""
+    data = open(path, "rb").read()
+    version = 3 if b"/*__wbTrimV3*/" in data else (1 if b"__wbStripLegacyString" in data else 0)
+    return {
+        "bytes": len(data),
+        "version": version,
+        "mtime": os.path.getmtime(path),
+        "ins_raw": len(RE_INS_RAW.findall(data)),
+        "in_raw": len(RE_IN_RAW.findall(data)),
+        "ins_wrapped": data.count(b"__wbStripLegacyAny("),
+        "in_wrapped": data.count(b"__wbCleanRuntimeInput("),
+        "helper": b"__wbTrimV3" in data,
+        "scrub": data.count(b"__wbScrubFetch") >= 2,
+        "blank": b"__wbBlank" in data,
+        "drop": b"__wbDropReminder" in data,
+    }
+
+
+def cli_problems(state):
+    out = []
+    if not state["helper"]:
+        out.append("helper")
+    if state["ins_raw"] or not state["ins_wrapped"]:
+        out.append("instructions")
+    if state["in_raw"] or not state["in_wrapped"]:
+        out.append("input")
+    if not state["scrub"]:
+        out.append("fetch-scrub")
+    if not state["blank"] or not state["drop"]:
+        out.append("helper-outdated")
+    return out
+
+
 def layer_cli(root):
     """返回 (rows, chunk_paths)。"""
     unpacked, chunks = find_chunks(root)
@@ -175,16 +223,25 @@ def layer_cli(root):
                      "detail": "没有文件同时含 modelInput.instructions / modelInput.input"})
         return rows, chunks
     for path in chunks:
-        data = open(path, "rb").read()
-        version = 3 if b"/*__wbTrimV3*/" in data else (1 if b"__wbStripLegacyString" in data else 0)
-        rows.append({"where": os.path.basename(path), "state": PASS,
-                     "detail": "bytes=%d version=%d mtime=%s"
-                               % (len(data), version, ts(os.path.getmtime(path)))})
-        for label, anchor, want in CLI_ANCHORS:
-            n = data.count(anchor.encode())
-            rows.append({"where": "    anchor %-12s" % label,
-                         "state": PASS if n >= want else FAIL,
-                         "detail": "count=%d (want %d)" % (n, want)})
+        st = cli_state(path)
+        bad = cli_problems(st)
+        rows.append({"where": os.path.basename(path),
+                     "state": PASS if not bad else FAIL,
+                     "detail": "bytes=%d version=%d mtime=%s%s"
+                               % (st["bytes"], st["version"], ts(st["mtime"]),
+                                  "" if not bad else "  ← " + ",".join(bad))})
+        rows.append({"where": "    instructions",
+                     "state": PASS if (st["ins_raw"] == 0 and st["ins_wrapped"]) else FAIL,
+                     "detail": "wrapped=%d raw=%d (raw 必须 0)" % (st["ins_wrapped"], st["ins_raw"])})
+        rows.append({"where": "    input",
+                     "state": PASS if (st["in_raw"] == 0 and st["in_wrapped"]) else FAIL,
+                     "detail": "wrapped=%d raw=%d (raw 必须 0)" % (st["in_wrapped"], st["in_raw"])})
+        rows.append({"where": "    fetch-scrub",
+                     "state": PASS if st["scrub"] else FAIL,
+                     "detail": "present=%s" % st["scrub"]})
+        rows.append({"where": "    helper",
+                     "state": PASS if (st["helper"] and st["blank"] and st["drop"]) else FAIL,
+                     "detail": "v3=%s blank=%s drop=%s" % (st["helper"], st["blank"], st["drop"])})
     return rows, chunks
 
 
@@ -222,8 +279,8 @@ def processes():
     if os.name != "nt":
         return []
     script = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'WorkBuddy|codebuddy' } | "
-              "ForEach-Object { \"{0}|{1}|{2}|{3}\" -f $_.ProcessId,$_.Name,"
-              "$($_.CreationDate.ToString('yyyy-MM-dd HH:mm:ss')),$_.CommandLine }")
+              "ForEach-Object { \"{0}|{1}|{2}|{3}|{4}\" -f $_.ProcessId,$_.Name,"
+              "$($_.CreationDate.ToString('yyyy-MM-dd HH:mm:ss')),$_.CommandLine,$_.ExecutablePath }")
     try:
         p = subprocess.run(["powershell", "-NoProfile", "-Command", script],
                            capture_output=True, text=True, encoding="mbcs",
@@ -233,11 +290,12 @@ def processes():
         return []
     rows = []
     for line in out.splitlines():
-        parts = line.strip().split("|", 3)
+        parts = line.strip().split("|", 4)
         if len(parts) < 3 or not parts[0].isdigit():
             continue
         rows.append({"pid": int(parts[0]), "name": parts[1], "started": parts[2],
-                     "cmd": parts[3] if len(parts) > 3 else ""})
+                     "cmd": parts[3] if len(parts) > 3 else "",
+                     "path": parts[4] if len(parts) > 4 else ""})
     return rows
 
 
@@ -435,7 +493,7 @@ def main():
             emit("                  %s" % loc)
         emit(r'            若安装在别处：scripts\doctor.cmd --install "<安装根目录>"')
 
-    problems, unproven = [], []
+    global_problems, per_install, unproven = [], {}, []
 
     emit("")
     emit("[1] 提示词模板（缓存 prompt.tpl，八个块必须 0）")
@@ -443,7 +501,7 @@ def main():
     for r in t_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
         if r["state"] in (FAIL, MISSING):
-            problems.append("templates %s: %s" % (r["where"].strip(), r["detail"]))
+            global_problems.append("templates %s: %s" % (r["where"].strip(), r["detail"]))
 
     chunk_paths = []
     for root in roots:
@@ -454,7 +512,7 @@ def main():
         for r in c_rows:
             emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
             if r["state"] in (FAIL, MISSING):
-                problems.append("cli %s: %s" % (r["where"].strip(), r["detail"]))
+                per_install.setdefault(root, []).append("cli %s: %s" % (r["where"].strip(), r["detail"]))
 
         emit("")
         emit("[3] app.asar  %s" % root)
@@ -462,7 +520,7 @@ def main():
         for r in a_rows:
             emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
             if r["state"] == FAIL:
-                problems.append("asar %s: %s" % (r["where"].strip(), r["detail"]))
+                per_install.setdefault(root, []).append("asar %s: %s" % (r["where"].strip(), r["detail"]))
         report["installs"].append({"root": root, "cli": c_rows, "asar": a_rows})
 
     chunk_mtime = max([os.path.getmtime(p) for p in chunk_paths] or [0.0])
@@ -474,7 +532,7 @@ def main():
     for r in p_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
     if stale:
-        problems.append("stale-process pid=%s 早于补丁启动" % ",".join(str(x) for x in stale))
+        global_problems.append("stale-process pid=%s 早于补丁启动" % ",".join(str(x) for x in stale))
 
     emit("")
     emit("[5] prewarm 池")
@@ -489,7 +547,7 @@ def main():
     for r in tr_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
     if tv == "dirty":
-        problems.append("trace 仍带 " + ", ".join(dirty))
+        global_problems.append("trace 仍带 " + ", ".join(dirty))
     elif tv == "older":
         unproven.append("最新请求早于补丁时间")
     elif tv == "no-trace":
@@ -501,7 +559,7 @@ def main():
     for r in h_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
         if r["state"] in (FAIL, MISSING):
-            problems.append("helper %s: %s" % (r["where"].strip(), r["detail"]))
+            global_problems.append("helper %s: %s" % (r["where"].strip(), r["detail"]))
 
     emit("")
     emit("[8] 判读规则（先看这里，再决定下一步）")
@@ -517,9 +575,44 @@ def main():
     emit("      · 仍出现则说明块是云端在服务端拼 prompt 时加的，本地删不掉；")
     emit("        本地能做的是不再上报时间（current-time / current-time-cloud 两个 asar 补丁）。")
 
+    # 哪一套是"当前在用"：有进程在跑 -> 它所在的安装；没有进程 -> 最新 trace 所属配置对应的安装
+    active = set()
+    for pr in procs:
+        path = (pr.get("path") or "").lower()
+        for r in roots:
+            if path.startswith(r.lower().rstrip("\\") + "\\"):
+                active.add(r)
+    if not active and trace and trace.get("path"):
+        tcfg = os.path.basename(os.path.dirname(os.path.dirname(trace["path"]))).lower()
+        for r in roots:
+            if os.path.basename(pair_config(r, cfgs)).lower() == tcfg:
+                active.add(r)
+
+    failing = {r: p for r, p in per_install.items() if p}
+    if active:
+        hard = {r: p for r, p in failing.items() if r in active}
+    else:
+        hard = failing if (failing and len(failing) == len(roots)) else {}
+    soft = {r: p for r, p in failing.items() if r not in hard}
+
     emit("")
-    if problems:
-        verdict, reason = "NOT EFFECTIVE", "; ".join(problems)
+    emit("[3.5] 每套安装的结论")
+    for r in roots:
+        tag = "当前使用" if r in active else ("未在使用" if active else "")
+        emit("    %-46s %-6s %s" % (r, FAIL if r in failing else PASS, tag))
+
+    emit("")
+    if global_problems or hard:
+        verdict = "NOT EFFECTIVE"
+        reason = "; ".join(global_problems + [x for p in hard.values() for x in p])
+    elif soft and not active:
+        verdict = "PARTIAL"
+        reason = ("有 %d 套安装没打全（本机没有运行中的进程，无法判断你在用哪套）：%s"
+                  % (len(soft), ", ".join(sorted(soft))))
+    elif soft:
+        verdict = "EFFECTIVE"
+        reason = ("当前使用的安装已生效；另有 %d 套未打全、不影响使用：%s"
+                  % (len(soft), ", ".join(sorted(soft))))
     elif unproven:
         verdict, reason = "UNPROVEN", "; ".join(unproven)
     else:
@@ -540,8 +633,8 @@ def main():
         print("report    : %s" % path)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
-    # UNPROVEN 不是"打补丁失败"，只是"还没有补丁后的新请求可以证明"；
-    # 只有 NOT EFFECTIVE 才是真的没生效。
+    # 只有 NOT EFFECTIVE 才非 0：UNPROVEN 是"还没有新请求可证明"，PARTIAL 是
+    # "当前这套好了、别的安装没打全"，都不该让 deploy 报红。
     return 1 if verdict == "NOT EFFECTIVE" else 0
 
 
