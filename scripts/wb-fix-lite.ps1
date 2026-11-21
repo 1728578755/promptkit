@@ -88,9 +88,15 @@ function Find-Installs {
         Get-ItemProperty $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match "WorkBuddy" } | ForEach-Object {
             foreach ($raw in @($_.InstallLocation, $_.DisplayIcon, $_.UninstallString)) {
                 if (-not $raw) { continue }
-                $p = ($raw -replace '^"', '') -replace '",.*$', ''
+                $p = ([string]$raw).Trim()
+                if ($p.StartsWith('"')) {
+                    $endQ = $p.IndexOf('"', 1)
+                    if ($endQ -gt 1) { $p = $p.Substring(1, $endQ - 1) }
+                } else {
+                    $p = ($p -split ' ')[0]
+                }
                 $p = $p -replace ',\s*\d+$', ''
-                if (Test-Path -LiteralPath $p) {
+                if ($p -and (Test-Path -LiteralPath $p)) {
                     if (Test-Path -LiteralPath $p -PathType Container) { $roots.Add($p) }
                     else { $roots.Add((Split-Path -Parent $p)) }
                 }
@@ -154,36 +160,64 @@ function Find-Chunks([string]$root) {
 }
 
 function Invoke-One([string]$path) {
-    $text = [IO.File]::ReadAllText($path)
-    $has = $text.Contains($BEGIN)
+    # 全程按字节处理：chunk 是多字节 UTF-8，用文本读写会有编码/换行风险。
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $origLen = $bytes.Length
+    $prefix = [Text.Encoding]::UTF8.GetBytes($SNIPPET + "`r`n")
+    $headLen = [Math]::Min(8192, $origLen)
+    $head = [Text.Encoding]::ASCII.GetString($bytes, 0, $headLen)
+    $hasLite = $head.Contains($BEGIN)
     Write-Host ("  chunk : {0}" -f $path)
+
     if ($Restore) {
-        if (-not $has) { Write-Host "         没有轻量补丁，无需还原" -ForegroundColor DarkGray; return }
-        $i = $text.IndexOf($BEGIN); $j = $text.IndexOf($END)
-        if ($i -lt 0 -or $j -lt 0) { Write-Host "         标记不完整，放弃" -ForegroundColor Red; return }
-        $clean = $text.Substring(0, $i) + $text.Substring($j + $END.Length)
+        if (-not $hasLite) { Write-Host "         没有轻量补丁，无需还原" -ForegroundColor DarkGray; return }
+        $endIdx = $head.IndexOf($END)
+        if ($endIdx -lt 0) { Write-Host "         标记不完整，放弃" -ForegroundColor Red; return }
+        $cut = $endIdx + $END.Length
+        if ($cut + 1 -lt $headLen -and $head[$cut] -eq "`r" -and $head[$cut + 1] -eq "`n") { $cut += 2 }
+        elseif ($cut -lt $headLen -and $head[$cut] -eq "`n") { $cut += 1 }
+        $back = New-Object byte[] ($origLen - $cut)
+        [Array]::Copy($bytes, $cut, $back, 0, $back.Length)
         if (-not $DryRun) {
             Copy-Item -LiteralPath $path -Destination ($path + ".lite.bak") -Force
-            [IO.File]::WriteAllText($path, $clean)
+            [IO.File]::WriteAllBytes($path, $back)
         }
-        Write-Host "         已移除轻量补丁" -ForegroundColor Green
+        Write-Host ("         已移除轻量补丁：{0:N0} -> {1:N0} 字节" -f $origLen, $back.Length) -ForegroundColor Green
         return
     }
-    if ($has) { Write-Host "         已有轻量补丁（无需重复）" -ForegroundColor Green; return }
-    $new = $SNIPPET + "`r`n" + $text
-    if ($DryRun) { Write-Host ("         [dry-run] 将写入 {0:N0} -> {1:N0} 字节" -f $text.Length, $new.Length); return }
+
+    if ($hasLite) { Write-Host "         已有轻量补丁（无需重复）" -ForegroundColor Green; return }
+
+    if ($DryRun) {
+        Write-Host ("         [dry-run] 将写入 {0:N0} -> {1:N0} 字节" -f $origLen, ($origLen + $prefix.Length))
+        return
+    }
+
+    $out = New-Object byte[] ($origLen + $prefix.Length)
+    [Array]::Copy($prefix, 0, $out, 0, $prefix.Length)
+    [Array]::Copy($bytes, 0, $out, $prefix.Length, $origLen)
 
     $bak = $path + ".lite.bak"
     Copy-Item -LiteralPath $path -Destination $bak -Force
-    [IO.File]::WriteAllText($path, $new)
-    $check = [IO.File]::ReadAllText($path)
-    $ok = $check.StartsWith($BEGIN) -and $check.EndsWith($text)
+    [IO.File]::WriteAllBytes($path, $out)
+
+    # 校验：前缀完全一致，且原文一字不差地跟在后面
+    $check = [IO.File]::ReadAllBytes($path)
+    $ok = ($check.Length -eq $out.Length)
+    if ($ok) {
+        for ($i = 0; $i -lt $prefix.Length; $i++) { if ($check[$i] -ne $prefix[$i]) { $ok = $false; break } }
+    }
+    if ($ok) {
+        for ($i = 0; $i -lt $origLen; $i++) {
+            if ($check[$prefix.Length + $i] -ne $bytes[$i]) { $ok = $false; break }
+        }
+    }
     if (-not $ok) {
         Copy-Item -LiteralPath $bak -Destination $path -Force
         Write-Host "         写入后校验失败，已回滚" -ForegroundColor Red
         return
     }
-    Write-Host ("         已写入：{0:N0} -> {1:N0} 字节，备份 {2}" -f $text.Length, $new.Length, (Split-Path -Leaf $bak)) -ForegroundColor Green
+    Write-Host ("         已写入：{0:N0} -> {1:N0} 字节，备份 {2}" -f $origLen, $out.Length, (Split-Path -Leaf $bak)) -ForegroundColor Green
 
     $node = Get-Command node -ErrorAction SilentlyContinue
     if ($node) {
@@ -193,7 +227,7 @@ function Invoke-One([string]$path) {
             Write-Host ("         node --check 失败，已回滚：{0}" -f ($r -join " ")) -ForegroundColor Red
         } else { Write-Host "         node --check OK" -ForegroundColor Green }
     } else {
-        Write-Host "         node 不在 PATH：跳过语法检查（写入前已做首尾一致性校验）" -ForegroundColor Yellow
+        Write-Host "         node 不在 PATH：跳过语法检查（已做逐字节首尾校验）" -ForegroundColor Yellow
     }
 }
 
