@@ -27,16 +27,27 @@ TARGETS = {
 }
 
 # 注入块（按渲染顺序）。用于归因：每块占多少字符。
-# 2026-11-17 起 quality_policy / agent_loop / regional_conventions 已按用户要求移除，不再出现在注入里。
 BLOCKS = [
     "refusal_policy", "personal_files_safety",
-    "agent_contract", "result_presentation", "final_answer_instructions",
-    "tool_use", "search_routing", "tool_routing", "task_management", "asking_questions",
-    "tool_usage_policy", "agent_skills", "response_language", "memory_system",
+    "agent_contract",
+    "tool_use", "search_routing", "tool_routing", "asking_questions",
+    "response_language", "memory_system",
     "user_memory", "user_info", "identity_context", "product_identity",
     "user_custom_instructions", "current_time", "craft_mode", "project_context",
     "system-reminder", "industry_mode_context", "boundaries", "interaction_principles",
     "core_capabilities", "tool_and_skill_principles", "tone_and_style",
+]
+
+# 用户明确要求删掉的段：真实请求里出现即退出码 1（不只是打一行 0）。
+#   2026-11-17：quality_policy / agent_loop / regional_conventions
+#   2026-11-21：tool_usage_policy / result_presentation / final_answer_instructions /
+#               task_management / agent_skills
+# 这些名字不放进 BLOCKS：BLOCKS 是"应该存在的块"的归因表，混在一起会让人以为
+# 「表里没有 = 没注入」，反而看不出"又被加回来了"。
+REMOVED = [
+    "quality_policy", "agent_loop", "regional_conventions",
+    "tool_usage_policy", "result_presentation", "final_answer_instructions",
+    "task_management", "agent_skills",
 ]
 
 
@@ -148,7 +159,20 @@ def main():
     print("-" * 44)
     print("%-26s %8d" % ("已归因合计", total))
 
+    # 已移除段：真实请求即证据。出现即失败，不依赖有没有记得传 --expect-absent。
     rc = 0
+    gone_bad = []
+    print()
+    print("已移除段（应全部 0 次）")
+    for name in REMOVED:
+        hit = "<%s>" % name
+        n = text.count(hit)
+        print("  %-26s %s" % (hit, "OK 不存在" if n == 0 else "!! 仍存在 %d 次" % n))
+        if n:
+            gone_bad.append(hit)
+    if gone_bad:
+        rc = 1
+
     absent = [s.strip() for s in args.expect_absent.split(",") if s.strip()]
     if absent:
         print()

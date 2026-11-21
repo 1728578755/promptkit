@@ -2,6 +2,58 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.3 — 2026-11-21
+
+主题：**按用户要求再删五段过程性说明，提示词继续瘦身。**
+
+用户原话：「删除tool_usage_policy，result_presentation，final_answer_instructions，task_management，agent_skills」。
+
+### 删了什么
+
+- `fragments/tool-usage-policy.md`（423 B，`<tool_usage_policy>`）整份删除。
+- `fragments/agent-skills.md`（384 B，`<agent_skills>`）整份删除。
+- `plugins/workbuddy-builtin/interactionmode/{craft,expert,plan}/fragments/task-management.md`（各 352 B，`<task_management>`）整份删除。
+- `plugins/workbuddy-builtin/interactionmode/{ask,craft,expert,plan}/fragments/result-presentation.md`（630 / 1,163 / 1,379 / 1,379 B）整份删除——这四个文件里装的就是 `<result_presentation>` 与 `<final_answer_instructions>`；ask 那份只有 `<final_answer_instructions>`，所以 ask 模式从此不再有任何「最终答复」约束段。
+- 三份入口模板各删 4 处 `{% include %}`：`work.tpl` 4,748 → 3,907、`code.tpl` 4,436 → 3,595、`design.tpl` 10,055 → 9,214（各 −841 B）。
+
+### 没动什么（避免误读）
+
+- `<tool_use>`、`<asking_questions>`、`<tool_routing>`、`<agent_contract>`、`<search_routing>` 全部保留。
+- `interactionmode-*/interaction.md` 里的 `tools:` 工具集**没有动**：`TaskCreate` / `TaskUpdate` / `TaskList`、`present_files` 仍然可用。删掉的是「怎么用它们的说明」，不是能力本身——是否保留工具由用户决定，不由框架代劳。
+
+### 渲染体积（CN 档，`npm run render` 后 dist 实际字节）
+
+| 模板/模式 | 前 | 后 | 变化 |
+|---|---:|---:|---:|
+| work·code craft | 10,315 | 7,983 | −2,332（−22.61%） |
+| work·code plan | 11,244 | 8,696 | −2,548（−22.66%） |
+| work·code expert | 10,569 | 8,021 | −2,548（−24.11%） |
+| work·code ask | 3,438 | 2,806 | −632（−18.38%） |
+| work·code quick | 1,583 | 1,581 | −2（仅少一行空行） |
+| design craft | 15,716 | 13,384 | −2,332（−14.84%） |
+| design plan | 16,645 | 14,097 | −2,548（−15.31%） |
+| design expert | 15,970 | 13,422 | −2,548（−15.95%） |
+| design ask | 5,209 | 4,577 | −632（−12.13%） |
+| design quick | 4,765 | 4,763 | −2（仅少一行空行） |
+| **合计（15 份）** | **132,603** | **108,417** | **−24,186（−18.24%）** |
+
+> 体积口径：`dist/` 数字包含 `interactionmode-*/interaction.md` 的 YAML frontmatter（craft / plan / expert 826–863 B、ask 163 B、quick 94 B），运行时宿主会把它解析成工具集后剥离，不发进请求。absolute 值因此略偏大，**同一轮的前后差值不受影响**。
+
+### 断言与门禁
+
+- `scripts/render-check.js`：`REMOVED_BLOCKS` 由 3 个扩到 8 个（11-17 三段 + 本轮五段），任一渲染出现即 `failures++`，`exit 1`。
+- `scripts/check.js`：同一份 8 个标签的「出现即失败」断言。
+- `scripts/measure-prompt-blocks.py`：这 5 个名字从归因表 `BLOCKS` 移到新列表 `REMOVED`，读真实 trace 时自动判红（不再依赖有没有记得传 `--expect-absent`）。
+- 反向验证（先证断言会红）：把删前的三份模板与九个片段还原到一棵临时树，用新断言渲染 → `RENDER FAILURES: 12`、`exit 1`（quick 三份与 ask 的 `<result_presentation>` 本就不含，故 3 份通过）。
+
+### 前缀缓存
+
+`npm run cache -- --strict` 仍 `exit 0`：同模式场景最低 96.19% → 96.18%（门禁 95%）。跨模式因共享前缀占比上升而改善：work craft~plan 75.87% → 84.76%、craft~ask 36.22% → 44.91%、design craft~plan 84.84% → 91.52%、craft~ask 73.07% → 83.60%。
+
+### 归档
+
+`archive/20261121-removed-five-blocks/`：九个片段原件、删前模板、`tools/remove-five-blocks.py`（幂等，可 `--check` 干跑）与回滚说明。
+
 ## v1.3.2 — 2026-11-21
 
 主题：**保留"打完启动"，只去掉"主动结束"**。
@@ -316,6 +368,8 @@ v1.1.6 及以前只发布提示词与部署脚本，`app.asar` 补丁、`product
 
 模板的 include 顺序改为三层，顺序本身就是缓存策略：
 
+> 下表与下面几条描述的是当时的顺序；其中 `tool-usage-policy` / `agent-skills` / `task-management` / `result-presentation` 已于 2026-11-21 按用户要求整段移除，此处只作历史记录。
+
 | 层 | 内容 | 何时会变 |
 |---|---|---|
 | A 恒定层 | preamble → `policy-common` → `workspace-safety` / `regional-conventions` → `agent-contract` → `search_routing` → `wecom-account-routing` → `tool-routing` → `asking-questions` → `tool-usage-policy` → `agent-skills` → `tool-use` / `task-management` | 只在改提示词或换安装时才变 |
@@ -323,7 +377,7 @@ v1.1.6 及以前只发布提示词与部署脚本，`app.asar` 补丁、`product
 | C 会话层 | `memory_system` → `industry_mode_context` → `<memory>` → `<user_memory>` → `<memory_paths>` → `This conversation is powered by …` | 换项目 / 换账号 / 记忆更新 / 换模型 |
 
 - `This conversation is powered by …` 从**首行**移到**最末行**。它带模型名，原来在第 38 个字符就出现，换模型等于整段前缀作废。
-- `tool-use` / `task-management` 提前到模式层之前：craft / plan / expert 三份内容逐字相同，提前后会话内换模式的公共前缀明显变长。
+- `tool-use` / `task-management` 提前到模式层之前：craft / plan / expert 三份内容逐字相同，提前后会话内换模式的公共前缀明显变长（`task-management` 已于 2026-11-21 移除）。
 
 ### 记忆区
 
@@ -343,7 +397,7 @@ v1.1.6 及以前只发布提示词与部署脚本，`app.asar` 补丁、`product
 - 新增 `fragments/workspace-safety.md`（数据目录提醒 + 个人目录安全）、`fragments/regional-conventions.md`（区域约定）、`fragments/asking-questions.md`（提问时机）。原来这三段是内联写在三份模板里的多份副本，改一处要改三处。
 - ask 模式的只读约束原来在 `mode-behavior.md` 与 `tool-use.md` 各写一遍，合并到 `tool-use.md` 一处。
 - 删除 `plugins/workbuddy-builtin/interactionmode/craft/fragments/interaction-tool-use.md`：该文件无任何 `{% include %}` 引用，是历史遗留副本。
-- 精简 `agent-skills.md`（3 行 → 2 行）、`policy-common.md`（去掉与模式无关的两条）、`tool-routing.md`（去掉与技能清单重复的触发词说明）。
+- 精简 `agent-skills.md`（3 行 → 2 行，该文件 2026-11-21 整份删除）、`policy-common.md`（去掉与模式无关的两条）、`tool-routing.md`（去掉与技能清单重复的触发词说明）。
 
 ### 脚本
 

@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.2**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.3**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -79,16 +79,18 @@ package.json       nunjucks 依赖与 npm scripts
 
 | 层 | 内容 | 何时会变 |
 |---|---|---|
-| **A 恒定层** | preamble → `policy-common` → `workspace-safety` → `agent-contract` → `search_routing` → `wecom-account-routing` → `tool-routing` → `asking-questions` → `tool-usage-policy` → `agent-skills` → `tool-use` / `task-management` | 只在改提示词或换安装时才变；craft / plan / expert 三者逐字相同 |
-| **B 模式层** | `interaction`（frontmatter 不进正文）→ `mode-behavior`（ask）→ `current-mode` → `result-presentation` | 只在对话内切换模式时变 |
+| **A 恒定层** | preamble → `policy-common` → `workspace-safety` → `agent-contract` → `search_routing` → `wecom-account-routing` → `tool-routing` → `asking-questions` → `tool-use` | 只在改提示词或换安装时才变；craft / plan / expert 三者逐字相同 |
+| **B 模式层** | `interaction`（frontmatter 不进正文）→ `mode-behavior`（ask）→ `current-mode` | 只在对话内切换模式时变 |
 | **C 会话层** | `memory_system` → `industry_mode_context` → `<memory>` → `<user_memory>` → `<memory_paths>` → `This conversation is powered by …` | 换项目 / 换账号 / 记忆更新 / 换模型，全部压到最后 |
 
 四条规则：
 
 1. **带模型名的那一行放最末**。`This conversation is powered by …` 曾经在首行，第 38 个字符就带模型名，换模型等于整段前缀作废；移到末尾后同样场景命中率 0.32% → 99.98%。
 2. **记忆区不写绝对路径**。`memory_system` 只说"用户级记忆目录 / 工作区记忆目录"，真实值由 `fragments/memory-paths.md` 在最末尾渲染成 `<memory_paths>`。换账号、换项目都不会动到前面的公共部分。
-3. **跨模式逐字相同的片段提前**。`tool-use` / `task-management` 在 craft / plan / expert 三份文件里内容一致，放到模式层之前，会话内换模式还能留住更长前缀。
+3. **跨模式逐字相同的片段提前**。`tool-use` 在 craft / plan / expert 三份文件里内容一致，放到模式层之前，会话内换模式还能留住更长前缀（`task-management` 已于 2026-11-21 随另外四段一并移除）。
 4. **`interactionmode-*/interaction.md` 的 frontmatter 不进正文**（宿主把它解析成工具集），所以它在正文里的位置不影响缓存。
+
+> **2026-11-21 用户要求再删五段**：`<tool_usage_policy>` / `<agent_skills>` / `<task_management>` / `<result_presentation>` / `<final_answer_instructions>` 整段移除。因此 A 层不再有 `tool-usage-policy` / `agent-skills` / `task-management`，B 层不再有 `result-presentation`；ask 模式不再有任何「最终答复」约束段。上表描述的是**移除后**的现行顺序。
 
 量化和断言（改顺序后必跑）：
 

@@ -26,18 +26,6 @@ One or a few targeted queries → WebSearch. Cross-source research, verification
 {% include "prompt-common/fragments/tool-routing.md" %}
 
 {% include "prompt-common/fragments/asking-questions.md" %}
-
-{% include "prompt-common/fragments/tool-usage-policy.md" %}
-
-{% include "prompt-common/fragments/agent-skills.md" %}
-
-{% if workMode == "plan" %}
-{% include "interactionmode-plan/fragments/task-management.md" %}
-{% elif workMode == "expert" %}
-{% include "interactionmode-expert/fragments/task-management.md" %}
-{% elif workMode == "craft" %}
-{% include "interactionmode-craft/fragments/task-management.md" %}
-{% endif %}
 {% endif %}
 
 {% if workMode == "ask" %}{% include "interactionmode-ask/fragments/tool-use.md" %}{% elif workMode == "plan" %}{% include "interactionmode-plan/fragments/tool-use.md" %}{% elif workMode == "expert" %}{% include "interactionmode-expert/fragments/tool-use.md" %}{% elif workMode == "quick" %}{% else %}{% include "interactionmode-craft/fragments/tool-use.md" %}{% endif %}
@@ -47,8 +35,6 @@ One or a few targeted queries → WebSearch. Cross-source research, verification
 {% if workMode == "ask" %}{% include "interactionmode-ask/fragments/mode-behavior.md" %}{% endif %}
 
 {% if workMode == "plan" %}{% include "interactionmode-plan/fragments/current-mode.md" %}{% elif workMode == "expert" %}{% include "interactionmode-expert/fragments/current-mode.md" %}{% elif workMode == "quick" %}{% include "interactionmode-quick/fragments/current-mode.md" %}{% endif %}
-
-{% if workMode == "ask" %}{% include "interactionmode-ask/fragments/result-presentation.md" %}{% elif workMode == "plan" %}{% include "interactionmode-plan/fragments/result-presentation.md" %}{% elif workMode == "expert" %}{% include "interactionmode-expert/fragments/result-presentation.md" %}{% elif workMode == "quick" %}{% else %}{% include "interactionmode-craft/fragments/result-presentation.md" %}{% endif %}
 
 {% if workMode != "ask" and workMode != "quick" %}
 {% include "prompt-common/fragments/workbuddy-memory-system.md" %}{% endif %}{% if workMode != "ask" %}{% if WorkingMemoryContent or UserInstructionsContent or UserMemoryContent %}

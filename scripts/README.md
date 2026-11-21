@@ -160,11 +160,16 @@ npm run render-check -- --root <dir>            # render from another root (e.g.
 npm run cache                                   # longest common prefix per change scenario
 npm run cache -- --strict                       # fail when a same-mode scenario drops below 95%
 npm run check-memory                            # <memory_system>/<memory_paths> across the four switches
+npm run test-removed                            # self-test: a canary of a removed tag must make render-check exit 1
 ```
 
-`render-check.js` also asserts: no leftover `{{`/`{%`, no `<content_policy>` in any mode, and none of
-the three blocks removed on 2026-11-17 (`<quality_policy>` / `<agent_loop>` / `<regional_conventions>`)
-in any template/mode under either profile — a hit exits with code 1.
+`render-check.js` also asserts: no leftover `{{`/`{%`, no `<content_policy>` in any mode, and none of the
+eight blocks removed at the user's request — 2026-11-17: `<quality_policy>` / `<agent_loop>` /
+`<regional_conventions>`; 2026-11-21: `<tool_usage_policy>` / `<result_presentation>` /
+`<final_answer_instructions>` / `<task_management>` / `<agent_skills>` — in any template/mode under either
+profile. A hit exits with code 1. `measure-prompt-blocks.py` gates the same five 2026-11-21 tags on a real
+trace (they live in its `REMOVED` list), so a block creeping back shows up on real requests, not only in
+the render.
 
 `cache-prefix.js` renders two versions of the same prompt that differ in exactly one variable (project
 folder, account memory path, model name, working memory, user memory, industry mode) and reports the

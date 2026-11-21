@@ -13,9 +13,7 @@ const REQUIRED = {
     "fragments/policy-common.md",
     "fragments/agent-contract.md",
     "fragments/tool-routing.md",
-    "fragments/tool-usage-policy.md",
     "fragments/asking-questions.md",
-    "fragments/agent-skills.md",
     "fragments/workspace-safety.md",
     "fragments/memory-paths.md",
     "fragments/workbuddy-memory-system.md",
@@ -138,6 +136,7 @@ const SYNC_FILES = [
   "scripts/sync-release.js",
   "scripts/cache-compare.js",
   "scripts/test-user-context-once.js",
+  "scripts/test-removed-blocks.js",
 ];
 
 // 有意保留两份实现的脚本：包内用同目录 node_modules / examples，工作区里指向 release\

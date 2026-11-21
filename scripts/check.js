@@ -35,8 +35,12 @@ for (const template of templates) {
 
     check(!text.includes("{{"), `${label}: template leftover "{{"`);
     check(!text.includes("{%"), `${label}: template leftover "{%"`);
-    // 2026-11-17 用户要求去掉的三段：出现即失败
-    for (const removed of ["quality_policy", "agent_loop", "regional_conventions"]) {
+    // 用户要求去掉的段：出现即失败（2026-11-17 三段 + 2026-11-21 五段）
+    for (const removed of [
+      "quality_policy", "agent_loop", "regional_conventions",
+      "tool_usage_policy", "result_presentation", "final_answer_instructions",
+      "task_management", "agent_skills",
+    ]) {
       check(!text.includes(`<${removed}>`), `${label}: ${removed} should be removed`);
     }
     check(text.includes("<refusal_policy>"), `${label}: missing refusal policy`);

@@ -82,8 +82,15 @@ const env = new nunjucks.Environment(createLoader(), { autoescape: false, throwO
 if (dist) fs.mkdirSync(dist, { recursive: true });
 if (RENDER_ROOT !== ROOT) console.log("render root: " + RENDER_ROOT);
 
-// 2026-11-17 用户明确要求去掉的三段：任何一份渲染结果里都不许再出现
-const REMOVED_BLOCKS = ["quality_policy", "agent_loop", "regional_conventions"];
+// 用户明确要求去掉的段：任何一份渲染结果里都不许再出现
+//   2026-11-17：quality_policy / agent_loop / regional_conventions
+//   2026-11-21：tool_usage_policy / result_presentation / final_answer_instructions /
+//                task_management / agent_skills
+const REMOVED_BLOCKS = [
+  "quality_policy", "agent_loop", "regional_conventions",
+  "tool_usage_policy", "result_presentation", "final_answer_instructions",
+  "task_management", "agent_skills",
+];
 
 let failures = 0;
 for (const template of templates) {
