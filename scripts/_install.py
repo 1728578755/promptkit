@@ -208,16 +208,19 @@ def _shortcut_roots():
     """开始菜单 / 桌面的 .lnk -> 目标 exe 所在目录。"""
     if os.name != "nt":
         return []
+    # 用 .NET 的已知文件夹取路径，避免在 Python 里拼引号/反斜杠。
     ps = (
         "$ErrorActionPreference='SilentlyContinue';"
-        "$dirs=@(\"$env:ProgramData\Microsoft\Windows\Start Menu\Programs\","
-        "\"$env:APPDATA\Microsoft\Windows\Start Menu\Programs\","
-        "\"$env:USERPROFILE\Desktop\",\"$env:PUBLIC\Desktop\");"
+        "$dirs=@("
+        "(Join-Path ([Environment]::GetFolderPath('CommonStartMenu')) 'Programs'),"
+        "(Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'),"
+        "[Environment]::GetFolderPath('Desktop'),"
+        "[Environment]::GetFolderPath('CommonDesktopDirectory'));"
         "$sh=New-Object -ComObject WScript.Shell;"
         "foreach($d in $dirs){ if(Test-Path -LiteralPath $d){"
         " Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -Depth 2 -ErrorAction SilentlyContinue |"
         " ForEach-Object { $t=$sh.CreateShortcut($_.FullName).TargetPath;"
-        " if($t -match 'WorkBuddy.*\.exe$'){ $t } } } }"
+        " if($t -match 'WorkBuddy.*\\.exe$'){ $t } } } }"
     )
     try:
         p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],

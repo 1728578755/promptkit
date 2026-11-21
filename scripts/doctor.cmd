@@ -55,7 +55,9 @@ echo.
 echo  Python is optional: doctor.py gives the deeper report, the
 echo  fallback still names every install and every missing patch.
 echo ----------------------------------------------------------
-powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%doctor-basic.ps1" %*
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS%" set "PS=powershell"
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%HERE%doctor-basic.ps1" %*
 set "RC=%errorlevel%"
 goto :done
 
