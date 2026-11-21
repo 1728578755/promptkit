@@ -9,7 +9,7 @@ goto :done
 :oneclick
 echo [WorkBuddy] One-click FULL deploy to every detected installation.
 echo   writes: prompt cache + install mirror + runtime-templates + product.json + app.asar
-echo   one UAC prompt; quit WorkBuddy first (this script never kills it), then app.asar can be written.
+echo   one UAC prompt; quit WorkBuddy first (never killed), patch, then it is started again.
 echo   other actions: deploy.cmd -Restore ^| -Verify ^| -ListTargets ^| -DryRun
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy.ps1" -Elevate

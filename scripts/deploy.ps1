@@ -221,6 +221,8 @@ function Invoke-AsarPatch($profile, $result) {
     $env:PYTHONIOENCODING = "utf-8"
     $asarOut = @()
     $asarArgs = @("-X", "utf8", $script, "--apply", "--asar", $asar)
+    # 打完自动启动应用（只启动，从不结束进程）；-NoRelaunch 关掉
+    if ($NoRelaunch) { $asarArgs += "--no-launch" }
     try {
         $asarOut = @(& $py @asarArgs 2>&1 | ForEach-Object { [string]$_ })
         $asarCode = $LASTEXITCODE
@@ -266,7 +268,10 @@ function Invoke-AsarPatch($profile, $result) {
             $result.Status = "FAIL"
         } else {
             $nPatched = @($st | Where-Object { $_ -match '^patch:\s+\S+\s+patched\b' }).Count
-            Add-Note $result ("app.asar verified: {0} patches + integrity + exe manifest" -f $nPatched)
+            $launchNote = if ($asarText -match '(?m)^已启动：') { "; app started" }
+                          elseif ($NoRelaunch) { "; app not started (-NoRelaunch)" }
+                          else { "" }
+            Add-Note $result ("app.asar verified: {0} patches + integrity + exe manifest{1}" -f $nPatched, $launchNote)
         }
     }
 }
@@ -442,6 +447,7 @@ function Invoke-AsarTarget($profile, [string]$mode) {
 
     $args = @($script, "--asar", $asar)
     if ($DryRun) { $args += "--dry-run" } else { $args += "--$mode" }
+    if ($NoRelaunch) { $args += "--no-launch" }
     Invoke-Python $py $args
     $code = $LASTEXITCODE
     if ($code -eq 2) {
@@ -455,17 +461,6 @@ function Invoke-AsarTarget($profile, [string]$mode) {
         return $result
     }
     $result.Status = "OK"
-
-    if ($mode -eq "apply" -and -not $DryRun -and -not $NoRelaunch) {
-        $exePath = Join-Path $profile.InstallPath $profile.ExeName
-        if (Test-Path -LiteralPath $exePath) {
-            # 必须经资源管理器启动：直接 Start-Process 会继承提权令牌，应用会以管理员身份运行
-            try {
-                Start-Process -FilePath "explorer.exe" -ArgumentList ('"{0}"' -f $exePath) | Out-Null
-                Add-Note $result "relaunched"
-            } catch { Add-Note $result "relaunch failed" }
-        }
-    }
     return $result
 }
 

@@ -2,6 +2,20 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.2 — 2026-11-21
+
+主题：**保留"打完启动"，只去掉"主动结束"**。
+
+- `patch-asar.py` 打完 asar / exe 清单后自动把应用启动起来：经 `explorer.exe` 拉起（本脚本通常是提权跑的，
+  直接 `Popen` 会让应用继承管理员令牌），`--no-launch` 可关；exe 不存在（例如在副本目录排障）就跳过。
+- `deploy.ps1` 的 `-Asar` 动作不再自己重启（避免与上面重复开两个实例），统一由 `patch-asar.py` 负责；
+  `-NoRelaunch` 现在等价于 `--no-launch`。部署路径（`deploy.cmd` 无参数）同样受益。
+- 仍然**从不结束任何进程**：应用在运行时 `patch-asar.py` 退出码 `4`、一个字节不写，
+  `deploy.ps1` 记 `FAIL` + 整体 `exit 1`。
+- 新增 `scripts/test-asar-launch.py`（8 项）：经 explorer 真拉起一个探针并断言标记文件生成、
+  exe 缺失 / `--no-launch` 时跳过、`patch-asar.py` 源码里不含 `taskkill` / `TerminateProcess` / `Stop-Process` / `kill(`。
+- 起因：用户「保留启动」。
+
 ## v1.3.1 — 2026-11-21
 
 主题：**移除"主动结束 WorkBuddy 进程"的能力**，改为只检测、不动手。

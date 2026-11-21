@@ -121,7 +121,8 @@ lead-in and the per-turn mode reminders; the script asserts each one renders as 
 Diagnostics that never write: `dump-system-prompt.py`, `dump-messages.py`, `trace-tokens.py`,
 `trace-turns.py`, `measure-prompt-blocks.py`, `measure-injected.py`, `measure-injection.py`,
 `list-desc.py`, `asar-grep.py`, `cache-compare.js`, `src-context.py`, `verify-tool-overrides.py`,
-`measure-product.py`, `tool-desc-map.py`, `export-tool-desc.py`, `test-user-context-once.js`.
+`measure-product.py`, `tool-desc-map.py`, `export-tool-desc.py`, `test-user-context-once.js`,
+`test-asar-launch.py`.
 `uc-seen.py` only touches `<config>\uc-seen\` (list / seed / clear / prune).
 
 ## Verify
@@ -209,6 +210,9 @@ turn the gate on with `--mode-threshold N`.
   `asar-grep.py` / `cache-compare.js` / `src-context.py` / `slim-mcp-descriptions.py` /
   `test-user-context-once.js` — read-only diagnostics
   (the last one asserts the `user-context-once` patch is intact).
+- `test-asar-launch.py` — asserts the launch-only path: a probe is really started through
+  `explorer.exe`, a missing exe or `--no-launch` is skipped, and the source contains no
+  process-killing call. 8 checks.
 - `uc-seen.py` — manage the `user-context-durable` markers under `<config>\uc-seen\`:
   `--count`, `--seed` (mark every session that already has a transcript, so an old chat stops
   re-injecting), `--clear <sid>`, `--prune <days>`.  `--seed` takes effect immediately: the patch

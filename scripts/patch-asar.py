@@ -614,6 +614,39 @@ def exe_write_blocked(exe_path):
         return True
 
 
+def launch_app(exe_path):
+    """把应用启动起来（**只启动，从不结束任何进程**）。
+
+    经 `explorer.exe` 拉起：本脚本通常是提权跑的，直接 Popen 会让应用继承管理员令牌；
+    资源管理器代启才是普通用户权限（deploy.ps1 早先也是这么做的）。
+    """
+    import subprocess
+    exe_path = os.path.abspath(exe_path)
+    if os.name == "nt":
+        subprocess.Popen(["explorer.exe", exe_path], close_fds=True)
+    else:
+        subprocess.Popen([exe_path], cwd=os.path.dirname(exe_path), close_fds=True)
+
+
+def maybe_launch(exe_path, enabled=True):
+    """写完之后把应用开回来。exe 不存在（比如在副本目录里排障）就什么都不做。"""
+    if not enabled:
+        print("启动：跳过（--no-launch）")
+        return False
+    if not exe_path or not os.path.isfile(exe_path):
+        print("启动：跳过（找不到 %s）" % (exe_path or "exe"))
+        return False
+    try:
+        launch_app(exe_path)
+        print("已启动：%s" % exe_path)
+        print("   （只启动，不结束任何进程；应用起来后才读到新 asar）")
+        return True
+    except Exception as e:
+        print("!! 启动失败：%s" % e)
+        print("   请手动打开 %s" % exe_path)
+        return False
+
+
 def file_locked(path):
     """能不能写这个文件（asar 也是被镜像映射的，运行中写不进去）。"""
     if not os.path.isfile(path):
@@ -789,6 +822,8 @@ def main():
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-node-check", action="store_true")
+    ap.add_argument("--no-launch", action="store_true",
+                    help="写完不要启动应用（默认会启动；本脚本从不结束任何进程）")
     args = ap.parse_args()
 
     asar = os.path.abspath(args.asar) if args.asar else ""
@@ -938,6 +973,8 @@ def main():
         print("asar sha256 %s (expect %s) -> %s" % (after[:16], meta["shaBefore"][:16], "OK" if ok else "MISMATCH"))
         if exe_edits:
             print("exe  sha256 -> %s" % ("OK" if exe_ok else "MISMATCH"))
+        if ok and exe_ok:
+            maybe_launch(exe_path or exe, not args.no_launch)
         return 0 if (ok and exe_ok) else 1
 
     # ---- apply / dry-run ----
@@ -1008,7 +1045,7 @@ def main():
             json.dump(meta, f, ensure_ascii=False, indent=2)
         print("exe sync: %d 处清单已更新 -> %s" % (len(exe_edits), hh[:16]))
         print("exe sha256: %s -> %s" % (exe_sha_before[:16], meta["exe"]["shaAfter"][:16]))
-        print("生效时机：重启 WorkBuddy")
+        maybe_launch(exe, not args.no_launch)
         return 0
 
     print("asar:      %s" % asar)
@@ -1204,7 +1241,7 @@ def main():
     if exe:
         print("exe:       %s -> %s" % (exe_sha_before[:16], meta["exe"]["shaAfter"][:16]))
     print("patches:   %s" % ", ".join("%s=%s" % (n, s) for n, s in patch_states(open(asar, "rb").read())))
-    print("生效时机：重启 WorkBuddy（已加载的进程沿用旧代码）")
+    maybe_launch(exe, not args.no_launch)
     return 0
 
 

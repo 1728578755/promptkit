@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.1**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.2**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -169,7 +169,8 @@ scripts\restore.cmd -DryRun               :: 只看计划
 
 scripts\deploy.cmd -Verify                :: 每个目标的一致性校验（含 include 解析）
 scripts\deploy.cmd -Pull                  :: 每个目标快照到 archive\pulls\
-scripts\deploy.cmd -Asar                  :: 退出应用后：提权 → 打 app.asar 补丁 → 再把应用拉起来
+scripts\deploy.cmd -Asar                  :: 退出应用后：提权 → 打补丁 → 自动把应用启动起来
+scripts\deploy.cmd -Asar -NoRelaunch       :: 同上，但打完不启动
 scripts\deploy.cmd -AsarRestore           :: 还原 app.asar
 scripts\deploy.cmd -SkipAsarPatch         :: 本次部署不打 asar 补丁
 scripts\deploy.cmd -SkipProductOverrides  :: 本次部署不动 product.json
@@ -250,7 +251,7 @@ scripts\deploy.cmd -SkipAsarPatch       :: 本次部署跳过 asar（默认会�
 → 卸载登记项（`DisplayIcon` / `InstallLocation` / `UninstallString`，且目录里必须真有 `WorkBuddy*.exe`）
 的顺序找；都没有就报错，不扫盘、不猜目录。
 
-#### 1.1 脚本不会去杀 WorkBuddy
+#### 1.1 不杀进程，但打完会把它启动起来
 
 写 asar 与 exe 清单时应用必须不在运行（Electron 把两者整份映射住，写入被系统拒绝）。
 本工具链**不会**替你结束进程：检测到被占用就以退出码 `4` 拒绝，一个字节都不写，并提示你完全退出（含托盘）后重跑。
@@ -260,7 +261,7 @@ scripts\deploy.cmd -SkipAsarPatch       :: 本次部署跳过 asar（默认会�
 | 只检测，不动手 | 用「试写一次」判断 asar/exe 是否被锁；被锁就 `exit 4`，不写任何字节 |
 | 部署会如实报失败 | `deploy.ps1` 把 asar 的 `exit 4` 记为 `FAIL`，整条命令 `exit 1`，不会"看起来成功" |
 | 打完必收口 | 补丁写完立刻用 `--status` 复核：任一补丁不是 `patched`、`integ` 或 `exe sync` 不是 `MATCH`，同样记 `FAIL` 并 `exit 1` |
-| 重启由你来 | `-Asar` 成功后会经资源管理器把应用拉起来（`-NoRelaunch` 可关），但前提是你自己先退出了它 |
+| 打完自动启动 | 写入成功后经 `explorer.exe` 拉起应用（不继承提权令牌），`-NoRelaunch` 或 `--no-launch` 可关；exe 不存在时跳过 |
 | 需要管理员 | 写 `Program Files` 与 exe 清单要提权；`deploy.cmd` 无参数会自提权一次 |
 
 ### 2. `product.json` 工具描述覆盖
@@ -331,6 +332,7 @@ npm run runtime       # 渲染四个 tpl 并断言注入块已按预期去掉（
 | `cache-compare.js` | 两份 `cache-prefix.js --json` 的逐项差异，用于核对"只改位置不改内容" |
 | `slim-mcp-descriptions.py` | 精简 MCP 插件里被重复拼接的工具描述常量 |
 | `test-user-context-once.js` | 断言 `user-context-once` 补丁的判据仍在（改完提示词必跑） |
+| `test-asar-launch.py` | 断言「打完启动应用」链路：经 explorer 真拉起一个探针、exe 缺失/`--no-launch` 时跳过、源码里没有任何结束进程的调用（8 项） |
 | `trace-turns.py` | 按轮读 trace 的请求体，判断某块是首轮一次还是每轮都有（附实测：trace 只落每个会话的首个请求） |
 | `uc-seen.py` | `user-context-durable` 的标记管理：`--count` / `--seed` / `--clear <sid>` / `--prune 30` |
 
