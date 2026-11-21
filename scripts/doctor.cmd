@@ -2,8 +2,8 @@
 setlocal EnableExtensions
 chcp 65001 >nul
 title WorkBuddy prompt doctor
-rem Read-only diagnostic. No admin, no writes to the install, safe to run any time.
-rem The window stays open at the end (set WB_NO_PAUSE=1 when calling from scripts).
+rem Read-only. No admin, no writes to the install, safe to run any time.
+rem Window stays open at the end (set WB_NO_PAUSE=1 when calling from scripts).
 
 set "HERE=%~dp0"
 set "PY="
@@ -14,29 +14,33 @@ if not defined PY (
     where python >nul 2>nul
     if not errorlevel 1 set "PY=python"
 )
-
-rem WorkBuddy ships its own python; use it when PATH has none
-if not defined PY (
-    if exist "%USERPROFILE%\.workbuddy\binaries\python\versions\current\python.exe" set "PY=%USERPROFILE%\.workbuddy\binaries\python\versions\current\python.exe"
-)
-if not defined PY (
-    for /d %%D in ("%USERPROFILE%\.workbuddy\binaries\python\versions\*") do (
-        if not defined PY if exist "%%~D\python.exe" set "PY=%%~D\python.exe"
-    )
-)
-
 if not defined PY (
     where py >nul 2>nul
     if not errorlevel 1 set "PY=py"
 )
 
-if not defined PY goto :nopython
+rem WorkBuddy ships its own Python. Its exact location is not assumed:
+rem read the "current" pointer, then look at every version entry.
+set "PYROOT=%USERPROFILE%\.workbuddy\binaries\python\versions"
+if not defined PY if exist "%PYROOT%" (
+    set "VER="
+    if exist "%PYROOT%\current" set /p VER=<"%PYROOT%\current"
+    if defined VER if exist "%PYROOT%\%VER%\python.exe" set "PY=%PYROOT%\%VER%\python.exe"
+)
+if not defined PY if exist "%PYROOT%" (
+    for %%D in ("%PYROOT%\*") do (
+        if not defined PY if exist "%%~fD\python.exe" set "PY=%%~fD\python.exe"
+    )
+)
 
+if defined PY goto :runpy
+goto :nopython
+
+:runpy
 echo Running doctor with: %PY%
 echo.
 "%PY%" -X utf8 "%HERE%doctor.py" --write-report %*
 set "RC=%errorlevel%"
-
 echo.
 echo ==========================================================
 echo  report : %HERE%..\reports\doctor-latest.txt
@@ -46,27 +50,13 @@ goto :done
 
 :nopython
 echo ==========================================================
-echo  [FAIL] No Python found - doctor cannot run.
+echo  [WARN] No Python found - using the PowerShell fallback.
 echo.
-echo  This alone explains "no result page": the script exits before
-echo  it can print anything useful.
-echo.
-echo  Pick one:
-echo    1. install Python 3 and tick "Add to PATH", then rerun this file;
-echo    2. set WORKBUDDY_PYTHON to a python.exe path;
-echo    3. WorkBuddy bundles one here:
-echo       %USERPROFILE%\.workbuddy\binaries\python\versions
-echo.
-echo  Raw facts that need no Python:
+echo  Python is optional: doctor.py gives the deeper report, the
+echo  fallback still names every install and every missing patch.
 echo ----------------------------------------------------------
-for %%R in ("C:\Program Files\WorkBuddy" "D:\Program Files\WorkBuddyAI" "%LOCALAPPDATA%\Programs\WorkBuddy") do (
-    if exist "%%~R\resources\app.asar" (
-        echo install: %%~R
-        dir /b "%%~R\resources\app.asar.unpacked\cli\dist\lazy-lite-wb" 2>nul
-    )
-)
-echo ----------------------------------------------------------
-set "RC=3"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%doctor-basic.ps1" %*
+set "RC=%errorlevel%"
 goto :done
 
 :done

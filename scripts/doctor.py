@@ -38,9 +38,14 @@ REMOVED_TAGS = [
     "task_management", "agent_skills", "quality_policy", "agent_loop",
     "regional_conventions",
 ]
-TRACE_MARKERS = [
-    "<current_time", 'data-role="additional-data"', 'data-role="user-context"',
-    "<additional_data", "<user_info", "<connector-status",
+# 必须 0 次：这些每轮重发就是 bug
+MUST_ZERO = [
+    "<current_time", 'data-role="additional-data"',
+]
+# 首轮允许 1 次、之后必须 0 次：这些是"一次性上下文"
+ALLOW_ONCE = [
+    'data-role="user-context"', "<additional_data", "<user_info",
+    "<connector-status",
 ]
 CLI_ANCHORS = [
     ("helper", "__wbStripLegacyString", 1),
@@ -64,35 +69,25 @@ def ts(mtime):
 
 # ---------------------------------------------------------------- installs
 def discover():
-    roots = []
-    env = os.environ.get("WORKBUDDY_INSTALL", "").strip().strip('"')
-    if env:
-        roots.append(env)
+    """所有能找到的安装：环境变量 / 注册表 / 进程 / 快捷方式 / 磁盘扫描。
+
+    不写死任何路径：新电脑上装到 D:、用户目录、改了目录名，都能找到。
+    """
     try:
         sys.path.insert(0, HERE)
         import _install  # noqa: WPS433
-        roots.extend(_install.install_roots())
+        return _install.install_roots_deep()
     except Exception:
-        pass
-    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
-                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-                 os.environ.get("LOCALAPPDATA", "")):
-        if not base:
-            continue
-        for name in ("WorkBuddy", "WorkBuddyAI", "WorkBuddy AI"):
-            roots.append(os.path.join(base, name))
-            roots.append(os.path.join(base, "Programs", name))
-    out, seen = [], set()
-    for root in roots:
-        if not root or not os.path.isdir(root):
-            continue
-        asar = os.path.join(root, "resources", "app.asar")
-        key = os.path.normcase(asar)
-        if key in seen or not os.path.isfile(asar):
-            continue
-        seen.add(key)
-        out.append(root)
-    return out
+        return []
+
+
+def searched():
+    """找不到安装时，把"找过哪里"打印出来，避免只给一句 NOT FOUND。"""
+    try:
+        import _install
+        return _install.scan_locations()
+    except Exception:
+        return []
 
 
 def config_dirs():
@@ -377,7 +372,7 @@ def newest_trace():
                     count, trunc = None, True
                 return {"path": path, "mtime": mtime, "raw": raw,
                         "messages": count, "truncated": trunc,
-                        "marks": {m: raw.count(m) for m in TRACE_MARKERS},
+                        "marks": {m: raw.count(m) for m in MUST_ZERO + ALLOW_ONCE},
                         "blocks": {t: raw.count("<" + t) for t in REMOVED_TAGS}}
     return None
 
@@ -395,11 +390,15 @@ def layer_trace(trace, chunk_mtime):
                            % (ts(trace["mtime"]), trace["messages"],
                               "  [TRUNCATED]" if trace["truncated"] else "",
                               "  ← 早于补丁，不能证明生效" if older else "")})
+    # messages<=2 视为首轮：一次性上下文允许出现 1 次
+    first_turn = (trace["messages"] or 0) <= 2
     for k, n in trace["marks"].items():
-        if n:
+        limit = 0 if k in MUST_ZERO else (1 if first_turn else 0)
+        ok = n <= limit
+        if not ok:
             dirty.append("%s=%d" % (k, n))
-        rows.append({"where": "    %-26s" % k, "state": PASS if n == 0 else FAIL,
-                     "detail": "count=%d" % n})
+        rows.append({"where": "    %-26s" % k, "state": PASS if ok else FAIL,
+                     "detail": "count=%d (limit %d%s)" % (n, limit, "，首轮" if limit else "")})
     for k, n in trace["blocks"].items():
         if n:
             dirty.append("%s=%d" % (k, n))
@@ -430,6 +429,11 @@ def main():
     emit("time      : %s" % report["time"])
     emit("config    : %s" % (", ".join(cfgs) if cfgs else "NOT FOUND"))
     emit("install   : %s" % (", ".join(roots) if roots else "NOT FOUND"))
+    if not roots:
+        emit("            找过: WORKBUDDY_INSTALL / 注册表卸载项 / 运行中进程 / 开始菜单快捷方式 /")
+        for loc in searched()[:12]:
+            emit("                  %s" % loc)
+        emit(r'            若安装在别处：scripts\doctor.cmd --install "<安装根目录>"')
 
     problems, unproven = [], []
 

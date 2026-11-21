@@ -24,6 +24,7 @@ Import from a sibling script (``scripts/`` is on ``sys.path`` when you run
 """
 import json
 import os
+import subprocess
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -175,3 +176,153 @@ def find_asar():
 def find_product():
     """<install>\\...\\cli\\product.json (either layout), or ''."""
     return _first(PRODUCT_RELS)
+
+# ---------------------------------------------------------------- deep scan
+# 新电脑上最常见的两种"找不到"：
+#   1) 安装目录不在 Program Files，注册表也没有（绿色版 / 换盘 / 改过目录名）；
+#   2) 用户目录是新的，~/.workbuddy 还不存在。
+# 下面这些来源都不写死任何路径：环境变量、注册表、正在运行的进程、开始菜单快捷方式，
+# 最后才做一次有深度上限的磁盘扫描。
+
+def _process_roots():
+    """正在运行的 WorkBuddy / codebuddy 进程 -> 它所在的安装目录。"""
+    if os.name != "nt":
+        return []
+    ps = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'WorkBuddy|codebuddy' } | "
+          "ForEach-Object { $_.ExecutablePath }")
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, encoding="mbcs",
+                           errors="replace", timeout=60)
+    except Exception:
+        return []
+    out = []
+    for line in (p.stdout or "").splitlines():
+        exe = line.strip().strip('"')
+        if exe.lower().endswith(".exe") and os.path.isfile(exe):
+            out.append(os.path.dirname(exe))
+    return out
+
+
+def _shortcut_roots():
+    """开始菜单 / 桌面的 .lnk -> 目标 exe 所在目录。"""
+    if os.name != "nt":
+        return []
+    ps = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "$dirs=@(\"$env:ProgramData\Microsoft\Windows\Start Menu\Programs\","
+        "\"$env:APPDATA\Microsoft\Windows\Start Menu\Programs\","
+        "\"$env:USERPROFILE\Desktop\",\"$env:PUBLIC\Desktop\");"
+        "$sh=New-Object -ComObject WScript.Shell;"
+        "foreach($d in $dirs){ if(Test-Path -LiteralPath $d){"
+        " Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -Depth 2 -ErrorAction SilentlyContinue |"
+        " ForEach-Object { $t=$sh.CreateShortcut($_.FullName).TargetPath;"
+        " if($t -match 'WorkBuddy.*\.exe$'){ $t } } } }"
+    )
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, encoding="mbcs",
+                           errors="replace", timeout=60)
+    except Exception:
+        return []
+    out = []
+    for line in (p.stdout or "").splitlines():
+        exe = line.strip().strip('"')
+        if exe.lower().endswith(".exe") and os.path.isfile(exe):
+            out.append(os.path.dirname(exe))
+    return out
+
+
+def scan_locations():
+    """磁盘扫描会看的位置（给诊断报告用，说明"找过哪里"）。"""
+    bases = []
+    for letter in "CDEFGHIJK":
+        drive = letter + ":\\"
+        if not os.path.isdir(drive):
+            continue
+        for sub in ("Program Files", "Program Files (x86)", "Apps", "Programs", "Software"):
+            bases.append(os.path.join(drive, sub))
+        users = os.path.join(drive, "Users")
+        if os.path.isdir(users):
+            try:
+                names = sorted(os.listdir(users))[:20]
+            except OSError:
+                names = []
+            for u in names:
+                bases.append(os.path.join(users, u, "AppData", "Local", "Programs"))
+    return bases
+
+
+def _walk_for_asar(base, depth=2):
+    """在 base 下有界地找 resources\app.asar，只看目录名像 WorkBuddy 的。"""
+    if not os.path.isdir(base):
+        return []
+    hits = []
+    queue = [(base, 0)]
+    seen = 0
+    while queue and seen < 2000:
+        cur, d = queue.pop()
+        seen += 1
+        if os.path.isfile(os.path.join(cur, "resources", "app.asar")):
+            hits.append(cur)
+        if d >= depth:
+            continue
+        try:
+            entries = os.listdir(cur)[:300]
+        except OSError:
+            continue
+        for name in entries:
+            path = os.path.join(cur, name)
+            low = name.lower()
+            if not os.path.isdir(path):
+                continue
+            # 深度 0：所有子目录都看一眼（有些安装器会多套一层厂商目录）；
+            # 更深一层只认名字里带 WorkBuddy 的，避免把整块盘翻一遍。
+            if d == 0 or "workbuddy" in low:
+                queue.append((path, d + 1))
+    return hits
+
+
+def _scan_roots():
+    out = []
+    for base in scan_locations():
+        out.extend(_walk_for_asar(base))
+        if len(out) > 12:
+            break
+    return out
+
+
+def _looks_like_workbuddy(root):
+    """文件夹名、exe 名、或 product.json 的 productName 任一指向 WorkBuddy。
+
+    Electron 应用都带 resources\app.asar，扫描时必须靠这三样把别家应用排除掉。
+    """
+    if "workbuddy" in os.path.basename(root).lower():
+        return True
+    if _is_workbuddy(root):
+        return True
+    try:
+        path = os.path.join(root, "resources", "app.asar.unpacked", "cli", "product.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                if "workbuddy" in fh.read(4000).lower():
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def install_roots_deep():
+    """把能找到的安装全找出来：环境变量 / 注册表 / 进程 / 快捷方式 / 磁盘扫描。"""
+    found = list(_pins())
+    found.extend(_registry_installs())
+    found.extend(_process_roots())
+    found.extend(_shortcut_roots())
+    found.extend(_scan_roots())
+    out = []
+    for root in _uniq(found):
+        if not os.path.isfile(os.path.join(root, "resources", "app.asar")):
+            continue
+        if _looks_like_workbuddy(root):
+            out.append(root)
+    return out

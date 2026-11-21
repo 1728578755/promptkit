@@ -52,7 +52,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BACKUPS = os.path.join(ROOT, "backups")
-DEFAULT_GLOB = r"C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\dist"
+DEFAULT_GLOB = ""   # 空 = 自动发现（环境变量 / 注册表 / 进程 / 快捷方式 / 磁盘扫描）；不写死任何机器路径
 
 MARK = "__wbStripLegacyString"
 TRIM_VERSION = 3
@@ -227,6 +227,22 @@ def write(path, data):
     with open(tmp, "wb") as fh:
         fh.write(data)
     os.replace(tmp, path)
+
+
+def default_targets():
+    """不写死路径：从环境变量 / 注册表 / 进程 / 快捷方式 / 磁盘扫描取每套安装的 cli\\dist。"""
+    try:
+        sys.path.insert(0, HERE)
+        import _install  # noqa: WPS433
+        roots = _install.install_roots_deep()
+    except Exception:
+        roots = []
+    out = []
+    for root in roots:
+        dist = os.path.join(root, "resources", "app.asar.unpacked", "cli", "dist")
+        if os.path.isdir(dist):
+            out.append(dist)
+    return out
 
 
 SKIP_DIRS = {"node_modules", ".git", "renderer", "locales", "assets"}
@@ -499,9 +515,17 @@ def main():
     if args.self_test:
         return self_test()
 
-    targets = find_targets(args.file)
+    if args.file:
+        targets = find_targets(args.file)
+    else:
+        targets = []
+        for dist in default_targets():
+            targets.extend(find_targets(dist))
+        targets = sorted(set(targets))
     if not targets:
-        print("[FAIL] no target matched %s" % args.file)
+        print("[FAIL] no target found: no file under any install carries "
+              "modelInput.instructions / modelInput.input.")
+        print("       pass --file <chunk|glob|directory>, or set WORKBUDDY_INSTALL.")
         return 2
 
     rc = 0

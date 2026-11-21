@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.10**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.11**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -143,6 +143,15 @@ package.json       nunjucks 依赖与 npm scripts
 > `trim()` 不会把它当空白，导致"空 `additional-data` 壳"在 JSON 层从未被删过；
 > 现已改为结构扫描 + 转义空白判断，`--self-test` 会拿原样块跑 fetch body 断言。
 > 已打过补丁的 chunk 也会**整段升级 helper**（之前 `--apply` 见到标记就跳过，内部修复进不去）。
+>
+> **v1.3.11 追加（新电脑 / 换路径）**：整套工具不再写死任何安装路径。
+> 发现顺序：`WORKBUDDY_INSTALL` → 卸载注册表 → 运行中的 `WorkBuddy*.exe` → 开始菜单/桌面快捷方式 →
+> 有界磁盘扫描（每盘 Program Files / Program Files (x86) / Apps / Programs / Software /
+> `Users\*\AppData\Local\Programs`，深度 2），再用文件夹名 / `WorkBuddy*.exe` / `product.json`
+> 过滤掉别家 Electron 应用。`patch-cli-trim.py` 的 `--file` 默认值改为自动发现。
+> 没有 Python 时 `doctor.cmd` 自动转用 `doctor-basic.ps1`（纯 PowerShell），
+> 同样会指出每套安装缺哪个标记。另修一个误报：`user_info` / `user-context` /
+> `connector-status` 是首轮一次性上下文，不该按"必须 0"判定。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。

@@ -2,6 +2,55 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.11 — 2026-11-21
+
+主题：**把写死的机器路径全部拆掉；没有 Python 也能诊断。**
+
+### 写死在哪（用户指出的问题）
+
+| 文件 | 原来 | 现在 |
+|---|---|---|
+| `patch-cli-trim.py` | `DEFAULT_GLOB = r"C:\Program Files\WorkBuddy\...\cli\dist"` | 默认空 = 自动发现；`--file` 仍可显式指定 |
+| `doctor.cmd` | 无 Python 时只列 `C:\Program Files\WorkBuddy`、`D:\Program Files\WorkBuddyAI` | 转调 `doctor-basic.ps1`，由它自己发现 |
+| `doctor.py` | 候选目录只来自固定的 Program Files 变量 | 环境变量 / 注册表 / 运行进程 / 开始菜单快捷方式 / 有界磁盘扫描 |
+
+### 发现顺序（都不写死路径）
+
+1. `WORKBUDDY_INSTALL`
+2. 卸载注册表（`DisplayIcon` / `InstallLocation` / `UninstallString`）
+3. **正在运行的 `WorkBuddy*.exe` 的 `ExecutablePath`**
+4. 开始菜单 / 桌面的 `.lnk` 目标
+5. 有界磁盘扫描：每盘 `<盘>:\Program Files`、`Program Files (x86)`、`Apps`、`Programs`、`Software`、`Users\*\AppData\Local\Programs`，深度 2、只看名字像 WorkBuddy 的目录
+6. 结果再用「文件夹名 / WorkBuddy*.exe / `product.json` 的 productName」过滤，避免把别的 Electron 应用（ZCode、Qwen、5EClient…）当成 WorkBuddy
+
+### 没有 Python 也能诊断
+
+新增 `doctor-basic.ps1`（纯 PowerShell，Windows 自带）：打印每套安装的 asar
+`current-time-cloud` 状态、chunk 文件名/大小/修改时间、以及
+`helper / scrub / blank / instructions / input` 五个标记的实际值。大 asar 用 4MB 分块
+扫描，不会把 170MB 整个读进内存。
+
+### 顺带修掉一个误报
+
+trace 里的 `<user_info>` / `user-context` / `connector-status` 是**首轮一次性上下文**，
+原来按"必须 0"判定，导致真实请求明明是正常的也报 FAIL。现在按 `messages<=2` 视作首轮，
+这些允许 1 次；`<current_time>` 与 `data-role="additional-data"` 仍然必须 0。
+
+### 本机实测（真实请求，不是模拟）
+
+```
+最新请求 18:22:13  messages=2
+<current_time                 count=0 (limit 0)
+data-role="additional-data"   count=0 (limit 0)
+data-role="user-context"      count=0 (limit 1，首轮)
+<user_info                    count=1 (limit 1，首轮)
+八个被删块                     全 0
+```
+
+搬移测试：把一份 chunk 放到 `%LOCALAPPDATA%\Programs\VendorX\WorkBuddy`（既不在
+Program Files、也没有注册表项），发现逻辑能命中；同时 `5EClient`、`166game`、`ZCode`、
+`Qwen`、`Codex` 等同类 Electron 应用被正确排除。
+
 ## v1.3.10 — 2026-11-21
 
 主题：**`doctor.cmd` 双击后窗口不再秒关；同时修掉一个真正让补丁失效的 bug。**

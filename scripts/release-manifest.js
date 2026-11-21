@@ -57,6 +57,7 @@ const REQUIRED = {
     "scripts/verify-stack.py",
     "scripts/doctor.py",
     "scripts/doctor.cmd",
+    "scripts/doctor-basic.ps1",
     "scripts/test-verify-hook.ps1",
     "scripts/_install.py",
   ],
@@ -113,6 +114,7 @@ const SYNC_DIRS = ["welcome-mode", "fragments", "plugins", "runtime-templates", 
 
 // 与源逐字节同步的单文件：部署链路 + 诊断脚本（这两棵树里必须一模一样）
 const SYNC_FILES = [
+  "scripts/doctor-basic.ps1",
   "scripts/doctor.py",
   "scripts/doctor.cmd",
   // 部署链路
