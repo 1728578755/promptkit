@@ -53,18 +53,21 @@ BACKUPS = os.path.join(ROOT, "backups")
 DEFAULT_GLOB = r"C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\dist\lazy-lite-wb\1849.*.mjs"
 
 MARK = "__wbStripLegacyString"
-TRIM_VERSION = 2
-HELPER_BEGIN = "/*__wbTrimV2*/"
+TRIM_VERSION = 3
+HELPER_BEGIN = "/*__wbTrimV3*/"
 HELPER_END = "/*__wbTrimEnd*/"
 ANCHOR = b'export const __rspack_esm_ids=["1849"];'
 
-HELPER = r'''/*__wbTrimV2*/
+HELPER = r'''/*__wbTrimV3*/
 function __wbStripLegacyString(s){
   if(typeof s!=="string")return s;
   const tags=["tool_usage_policy","result_presentation","final_answer_instructions","task_management","agent_skills","quality_policy","agent_loop","regional_conventions"];
   for(const t of tags){s=s.replace(new RegExp("<"+t+"\\b[^>]*>[\\s\\S]*?<\\/"+t+">\\s*","g"),"");}
   s=s.replace(/<current_time>[\s\S]*?<\/current_time>\s*/g,"");
   s=s.replace(/<additional_data>[\s\S]*?<\/additional_data>\s*/g,"");
+  // 云端/桌面端会把 current_time 包进 data-role="additional-data"；
+  // 清掉 current_time 后若整块只剩空白，就把整个空壳也删掉。
+  s=s.replace(/<system-reminder\s+data-role=["']additional-data["']>([\s\S]*?)<\/system-reminder>\s*/g,function(m,inner){return inner.trim()?m:""});
   return s;
 }
 function __wbStripUserContext(s){
@@ -174,7 +177,26 @@ def write(path, data):
 def find_targets(pattern):
     if os.path.isfile(pattern):
         return [pattern]
-    return sorted(glob.glob(pattern))
+    if os.path.isdir(pattern):
+        folder = pattern
+        hits = []
+    else:
+        folder = os.path.dirname(pattern)
+        hits = sorted(p for p in glob.glob(pattern) if os.path.isfile(p))
+        if hits:
+            return hits
+    # 版本升级会改 chunk 的哈希名；按内容找承载运行时的那一个，保证别的电脑/别的
+    # WorkBuddy 版本也能打上，而不是静默跳过。
+    if not os.path.isdir(folder):
+        return []
+    for path in sorted(glob.glob(os.path.join(folder, "*.mjs"))):
+        try:
+            data = read(path)
+        except OSError:
+            continue
+        if b'modelInput.instructions' in data and b'modelInput.input' in data:
+            hits.append(path)
+    return hits
 
 
 def node_check(path):
@@ -222,7 +244,7 @@ def patch(data):
 
 
 def version_of(data):
-    """0 = 原始；1 = v1（判据错误，历史 user-context 从未被删）；2 = 当前版本。"""
+    """0 = 原始；1 = v1（判据错误，历史 user-context 从未被删）；2 = v2（role 判据/--file）；3 = v3（additional-data 空壳）。"""
     if HELPER_BEGIN.encode() in data:
         return TRIM_VERSION
     if MARK.encode() in data:
@@ -283,6 +305,11 @@ def self_test():
         "<user_query>second</user_query>"
     )
     reminder_only = '<system-reminder data-role="hook">tick</system-reminder>'
+    only_time = (
+        '<system-reminder data-role="additional-data">' + chr(10) +
+        '<current_time>Saturday, November 21, 2026 at 17:17:54 GMT+8</current_time>' + chr(10) +
+        '</system-reminder>'
+    )
     lines = [
         "const mk=(t)=>({role:'user',content:[{type:'text',text:t}]});",
         "const asst={role:'assistant',content:[{type:'text',text:'<current_time>keep me</current_time>'}]};",
@@ -292,6 +319,12 @@ def self_test():
         "if(t.includes('tool_usage_policy'))throw new Error('legacy tag kept');",
         "if(!t.includes('hello')||!t.includes('second'))throw new Error('real query lost');",
         "if(!t.includes('panel_tabs'))throw new Error('current turn additional-data lost');",
+        "const onlyTime=%s;" % json.dumps(only_time),
+        "const t3=JSON.stringify(__wbCleanRuntimeInput([mk(%s),asst,mk(onlyTime)]));" % json.dumps(first_turn),
+        "if(t3.includes('additional-data'))throw new Error('empty additional-data shell kept');",
+        "if(t3.includes('Saturday'))throw new Error('current_time kept in user message');",
+        "const sys2=__wbStripLegacyAny(onlyTime);",
+        "if(sys2.trim())throw new Error('system additional-data shell kept: '+sys2);",
         "if(!t.includes('keep me'))throw new Error('assistant history was rewritten');",
         "const one=[mk(%s)];" % json.dumps(first_turn),
         "if(!JSON.stringify(__wbCleanRuntimeInput(one)).includes('user_info'))throw new Error('first turn lost context');",

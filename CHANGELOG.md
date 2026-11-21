@@ -2,6 +2,52 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.7 — 2026-11-21
+
+主题：**`current_time` 的 `data-role="additional-data"` 空壳彻底清掉；别的电脑/别的版本也能打。**
+
+### 根因
+
+- 用户仍看到：
+
+  ```text
+  <system-reminder data-role="additional-data">
+  <current_time>Saturday, November 21, 2026 at 17:17:54 GMT+8</current_time>
+  </system-reminder>
+  ```
+
+- 该块由云端 `resolveMessage` 生成：`/main/server.js` 的
+  `t.currentTime&&(r.current_time=t.currentTime)` 把时间发给云端；
+  旧 `current-time` 补丁只改了 `AdditionalDataSection.render`，没改这条上行字段。
+- CLI v2 只删 `<current_time>` 标签，留下空的 `data-role="additional-data"` 壳。
+
+### 改了什么
+
+- `patch-cli-trim.py` **v3**：删掉 `<current_time>` 后，若 `data-role="additional-data"`
+  块只剩空白，把整个空壳也删除；`--self-test` 新增该断言。
+- chunk 查找从硬编码 `1849.*.mjs` 改为**按内容回退**（找同时含 `modelInput.instructions`
+  与 `modelInput.input` 的 chunk），别的 WorkBuddy 版本/别的电脑也能找到目标。
+- `patch-asar.py` 新增 **`current-time-cloud`**：
+  `t.currentTime&&(r.current_time=t.currentTime),` → 等长的 `0            &&(r.current_time=t.currentTime),`，
+  不再把 `current_time` 发给云端 `resolveMessage`。
+- 版本 v1.3.6 → **v1.3.7**。
+
+### 证据
+
+- CLI v3 本机：`version: 3 (expected 3)`、`PATCHED`、251,478 字节、`SELF TEST OK`。
+- asar **副本**（不碰运行中的应用）：
+  `patches: current-time, current-time-cloud, …` 共 9 个全 `patched`；
+  旧锚点 0 次、新锚点 1 次；`node --check: OK`；integrity `MATCH`。
+- release 门禁：`render` / `check` / `render-check cn` / `cache --strict` / `check-memory` /
+  `test-removed` / `audit` 全 exit 0，版本号三处一致 v1.3.7。
+
+### 边界
+
+- 本机 asar 仍在运行中，`current-time-cloud` 显示 `raw`；关掉 WorkBuddy 后跑
+  `scripts\deploy.cmd` 才会写入并拉起。CLI v3 已经在 provider 边界先把空壳删掉。
+- 如果云端改用服务端时间生成块，本地不再发 `current_time` 也可能仍有；需要新聊天实测。
+- trace 仍只存 20,000 字符前缀。
+
 ## v1.3.6 — 2026-11-21
 
 主题：**“原样输出完整上下文”改为读 trace，不再允许模型凭记忆编造。**

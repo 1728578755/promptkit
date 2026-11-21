@@ -145,6 +145,19 @@ def _pairs_current_time(data):
     return [(old, make_replacement(len(old)))]
 
 
+def _pairs_current_time_cloud(data):
+    """不把 current_time 发给云端 resolveMessage；云端据此生成 additional-data 块。"""
+    old = b"t.currentTime&&(r.current_time=t.currentTime),"
+    new = b"0" + b" " * 12 + b"&&(r.current_time=t.currentTime),"
+    if len(old) != len(new):
+        raise ValueError("current-time-cloud 不等长：%d vs %d" % (len(old), len(new)))
+    n = data.count(old)
+    if n == 1:
+        return [(old, new)]
+    if data.count(new) == 1:
+        return []
+    raise ValueError("current-time-cloud 锚点命中 %d 次" % n)
+
 def _pairs_user_info(data):
     """重写整个 <user_info> 表达式：去掉 OS/主题与 Time，Shell 兜底写明 Git Bash。
 
@@ -348,6 +361,12 @@ PATCHES = [
         "title": "去掉每轮注入的 <current_time> 块",
         "fn": _pairs_current_time,
         "applied": lambda d: b"*/],i=renderPanelTabsContext" in d,
+    },
+    {
+        "name": "current-time-cloud",
+        "title": "current_time 不再发给云端 resolveMessage（additional-data 块的上游）",
+        "fn": _pairs_current_time_cloud,
+        "applied": lambda d: b"0            &&(r.current_time=t.currentTime)" in d,
     },
     {
         "name": "user-info",
