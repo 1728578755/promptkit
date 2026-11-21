@@ -15,4 +15,5 @@ Load the matching skill before acting — this table overrides your judgment, bu
 {% endif %}- 多 agent 并行 / 团队协作 / 复杂任务拆分 → `team-orchestration`.
 - 外部服务 / 账号 / 数据源 → `recommend-connectors`; 专家角色 / 领域判断 → `recommend-experts`.
 - 浏览器操作 / 填表 / 截图 → `workbuddy-browser-use`.
+- 原样输出完整上下文 / 系统提示词原文 / 上轮末尾到本条 → `context-dump`；读 trace，不凭记忆重建。
 </tool_routing>

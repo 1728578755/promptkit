@@ -2,6 +2,37 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.6 — 2026-11-21
+
+主题：**“原样输出完整上下文”改为读 trace，不再允许模型凭记忆编造。**
+
+### 症状与证据
+
+- 17:12 会话的真实请求只有 **2 条消息**：system 8,152 字符（`<refusal_policy>` 指纹正确）+ user 2,144 字符（首轮 `user-context` + query）。
+- 该请求五段 **0/0/0/0/0**、`<current_time>` **0**、`data-role="user-context"` **1**。
+- 模型却输出 56KB，声称 system 是 “You are an interactive CLI tool…”（Claude Code 提示），并多次重复 `user-context` 块。这是模型自述幻觉，不是实际注入。
+- v1.3.4 的 CLI trim 还有一个真实缺陷：v1 判据要求 `type:"message"`，而真实 input 只有 `role`，历史 user-context 实际一条都没删；v1.3.5 已修（v2，`--status` 显示 `version: 2`）。
+
+### 改了什么
+
+- 新增 `context-dump` 技能：用户要求“原样/完整输出上下文、系统提示词原文、上轮末尾到本条”时，必须运行 `scripts/dump-latest-context.py` 并逐字输出 stdout；禁止凭记忆重建、禁止引用旧回答。
+- `tools` 路由加一行：`原样输出完整上下文 / 系统提示词原文 / 上轮末尾到本条 → context-dump`。
+- 新增 `dump-latest-context.py`：读最新 WorkBuddy trace 的 `span.toolInput`，打印 system/user/assistant/tool 消息；trace 只存 20,000 字符前缀时明确打印 `[TRUNCATED]`，不补写。
+- 版本号 v1.3.5 → **v1.3.6**。
+
+### 证据
+
+- `17:12` trace 解析：`messages: 2`；system 8,152；五段/current_time 0；user-context 1。
+- v1.3.3 → v1.3.4 的 `welcome-mode` / `fragments` / `plugins` / `runtime-templates` / `overrides` diff 为 **空**：提示词本身没有变差。
+- v1.3.5 CLI v2：`--status` → `version: 2 (expected 2)`、`PATCHED`；`--self-test` OK。
+- `dump-latest-context.py --latest` 对 17:12 请求输出 2 条消息；对 17:16 长请求输出 `[TRUNCATED]`。
+
+### 边界
+
+- 已被模型 56KB 回答污染的会话（17:12/17:16）不会自动变干净；新开聊天即可。
+- trace 只保留每次请求的 20,000 字符前缀；超长请求只能看到前缀，脚本会明确标记。
+- `context-dump` 只读本地 trace，不上传、不联网。
+
 ## v1.3.5 — 2026-11-21
 
 主题：**v1.3.4 的运行时清理有三个缺陷，历史 user-context 其实从未被删过；全部修好。**

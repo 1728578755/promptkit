@@ -38,6 +38,7 @@ const REQUIRED = {
   "技能（抽查）": [
     "plugins/workbuddy-builtin/skills/workbuddy-docs/SKILL.md",
     "plugins/workbuddy-builtin/skills/team-orchestration/SKILL.md",
+    "plugins/workbuddy-builtin/skills/context-dump/SKILL.md",
   ],
   "部署脚本（一键全量必需）": [
     "scripts/deploy.cmd",
@@ -73,6 +74,7 @@ const REQUIRED = {
     "scripts/asar-grep.py",
     "scripts/dump-messages.py",
     "scripts/dump-system-prompt.py",
+    "scripts/dump-latest-context.py",
     "scripts/dump-templates.py",
     "scripts/measure-injected.py",
     "scripts/measure-injection.py",
@@ -140,6 +142,7 @@ const SYNC_FILES = [
   "scripts/asar-grep.py",
   "scripts/dump-messages.py",
   "scripts/dump-system-prompt.py",
+  "scripts/dump-latest-context.py",
   "scripts/dump-templates.py",
   "scripts/measure-injected.py",
   "scripts/measure-injection.py",

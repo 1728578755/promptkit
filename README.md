@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.5**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.6**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -110,6 +110,7 @@ package.json       nunjucks 依赖与 npm scripts
 > 另外数组 content 清理后 `changed` 没置位，清理结果被整个丢掉。v2 两处都修了，
 > 并且 `deploy.ps1` 给每套安装分别传 `--file`——AI 版此前一直在打 CN 的路径，自己那份从未被改。
 > `--status` 现在输出 `version:`，`deploy` 见到 v1 会先从最早备份还原再重打。
+> **v1.3.6 追加**：用户要求“原样输出完整上下文”时，模型会凭记忆编造（17:12 实际只有 2 条消息，模型却输出 56KB 并自称 Claude Code 系统提示）。新增 `context-dump` 技能 + `dump-latest-context.py`：必须读最新 trace 并逐字输出；trace 只存 20,000 字符前缀时明确标记 `[TRUNCATED]`。已被长回答污染的会话请新开聊天。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。
