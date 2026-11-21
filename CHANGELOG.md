@@ -2,6 +2,49 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.10 — 2026-11-21
+
+主题：**`doctor.cmd` 双击后窗口不再秒关；同时修掉一个真正让补丁失效的 bug。**
+
+### 1. "运行结果页没有"
+
+- 旧 `doctor.cmd` 没有 `pause`：双击 → 跑完 → 窗口立刻消失，看起来"什么都没发生"。
+  现在结束时一定停住，并打印报告路径与退出码；脚本调用可设 `WB_NO_PAUSE=1`。
+- 旧脚本只找 PATH 里的 `python`。WorkBuddy 自带的
+  `%USERPROFILE%\.workbuddy\binaries\python\versions\*\python.exe` 现在会被优先使用；
+  都没有时打印原始信息（安装目录 + chunk 文件名）而不是静默退出。
+- `doctor.cmd` 改为纯 ASCII（中文只由 Python 输出），避免 cmd 代码页把批处理本身搞坏。
+- 结论移到报告**第一屏**，不用滚到底。
+
+### 2. 真正让块留在请求里的 bug（关键）
+
+出口清理（fetch）拿到的 body 是 **JSON 文本**，其中换行是字面量 `\n`（反斜杠+n），
+`inner.trim()` 不会把它当空白 —— 于是"`additional-data` 只剩空白就删掉"这条规则
+在 JSON 层**从来没生效过**：
+
+```text
+{"text":"<system-reminder data-role=\"additional-data\">\n\n</system-reminder>\n<user_query>…"}
+```
+
+现在改成结构扫描 + 显式把 `\n` / `\r` / `\t` / `\"` 当空白判断（`__wbBlank`），
+并新增 `--self-test` 断言：把原样块塞进 `fetch` 的 JSON body，清理后必须
+`CLEAN: true` 且 `user_query` 仍在；干净 body 必须原样透传。
+
+### 3. 已打过补丁的 chunk 现在能升级
+
+之前 `--apply` 见到 `MARK` 就 `already`，**help 函数内部的修复永远进不去**。
+现在会比对 helper 文本（缺 `__wbBlank` / `__wbDropReminder` 即视为旧版），
+整段替换为仓库当前版本，再补 fetch 出口清理。
+
+### 4. 证据
+
+- 副本升级：251,478 → 253,385 字节，`helper-upgrade` + `fetch-scrub` = `patched`，
+  `node --check OK`，`--status` = `PATCHED`。
+- 用升级后的 chunk 跑真实 JSON body：
+  `CLEAN: true`、`QUERY KEPT: true`，输出只剩
+  `{"input":[{"role":"user","content":[{"type":"text","text":"\n<user_query>…</user_query>"}]}]}`。
+- `doctor.py` 的 `[2]` 增加 `anchor fetch-scrub`；报告首行即结论。
+
 ## v1.3.9 — 2026-11-21
 
 主题：**一条 `doctor` 命令把每一项都打出来——包括"应该存在却没有"的项，并直接说为什么没生效。**

@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.9**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.10**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -136,6 +136,13 @@ package.json       nunjucks 依赖与 npm scripts
 > 并把**磁盘上那份 chunk 里的清理函数抽出来**拿原样块跑一遍（`INSTALLED HELPER OK`）。
 > 结论只有三选一：`EFFECTIVE` / `UNPROVEN`（还没有补丁后的新请求）/ `NOT EFFECTIVE: <哪层、什么现象>`，
 > 报告写到 `reports\doctor-latest.txt`。`deploy` 结束时的验收也改成调用它。
+>
+> **v1.3.10 追加**：`doctor.cmd` 双击不再秒关（结束时 `pause`，并优先使用 WorkBuddy 自带
+> Python；缺 Python 时也打印安装目录与 chunk 名，不再静默退出），结论放在第一屏。
+> 同时修掉一个真 bug：fetch 出口清理拿到的是 JSON 文本，换行是字面量 `\n`，
+> `trim()` 不会把它当空白，导致"空 `additional-data` 壳"在 JSON 层从未被删过；
+> 现已改为结构扫描 + 转义空白判断，`--self-test` 会拿原样块跑 fetch body 断言。
+> 已打过补丁的 chunk 也会**整段升级 helper**（之前 `--apply` 见到标记就跳过，内部修复进不去）。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。

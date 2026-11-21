@@ -58,6 +58,31 @@ MARK = "__wbStripLegacyString"
 TRIM_VERSION = 3
 HELPER_BEGIN = "/*__wbTrimV3*/"
 HELPER_END = "/*__wbTrimEnd*/"
+
+# 最后一道：在进程出口（fetch）再扫一遍请求体。
+# 前面所有清理都在 modelInput 边界；如果某个调用方绕开了那条路径、或者块是别处拼进来的，
+# 只要它出现在要发出去的 JSON 里，这里就一定会删掉。只在真的含标记时才动 body，
+# 其它请求原样透传；任何异常都退回原始 fetch。
+SCRUB = r'''/*__wbTrimScrub*/
+function __wbScrubFetch(){
+  try{
+    const f=globalThis.fetch;
+    if(typeof f!=="function"||f.__wbScrubbed)return;
+    const wrapped=function(input,init){
+      try{
+        if(init&&typeof init.body==="string"&&(init.body.indexOf("additional-data")>=0||init.body.indexOf("<current_time")>=0)){
+          const b=__wbStripLegacyString(init.body);
+          if(b!==init.body)init=Object.assign({},init,{body:b});
+        }
+      }catch(e){}
+      return f.call(this,input,init);
+    };
+    wrapped.__wbScrubbed=true;
+    globalThis.fetch=wrapped;
+  }catch(e){}
+}
+__wbScrubFetch();
+/*__wbTrimScrubEnd*/'''
 ANCHOR = b'export const __rspack_esm_ids=["1849"];'
 
 HELPER = r'''/*__wbTrimV3*/
@@ -67,13 +92,41 @@ function __wbStripLegacyString(s){
   for(const t of tags){s=s.replace(new RegExp("<"+t+"\\b[^>]*>[\\s\\S]*?<\\/"+t+">\\s*","g"),"");}
   s=s.replace(/<current_time>[\s\S]*?<\/current_time>\s*/g,"");
   s=s.replace(/<additional_data>[\s\S]*?<\/additional_data>\s*/g,"");
-  // 云端/桌面端会把 current_time 包进 data-role="additional-data"；
-  // 清掉 current_time 后若整块只剩空白，就把整个空壳也删掉。
-  s=s.replace(/<system-reminder\s+data-role=["']additional-data["']>([\s\S]*?)<\/system-reminder>\s*/g,function(m,inner){return inner.trim()?m:""});
+  // 云端/桌面端会把 current_time 包进 data-role="additional-data"；清掉 current_time 后
+  // 整块只剩空白，就把空壳也删掉。用结构扫描而不是正则：这一层还会收到 JSON 序列化后的
+  // 文本（fetch body），里面的引号写成 \" 甚至 \\\"，正则很容易漏。
+  s=__wbDropReminder(s,"additional-data",true);
   return s;
 }
+// 按结构删除 <system-reminder ... role ...>inner</system-reminder>：
+// open 取 role 之前最近的 "<system-reminder"，close 取其后第一个闭合标签。
+// emptyOnly=true 时只有 inner 全空白才删（additional-data 还要留给 panel_tabs 等）。
+// JSON 文本里的换行是字面量 反斜杠+n、tab 是 反斜杠+t，trim() 不会去掉它们，
+// 所以"只剩空白"的判断必须把这些转义也当成空白。（用 fromCharCode 避免多层转义）
+function __wbBlank(inner){
+  const B=String.fromCharCode(92);
+  return inner.split(B+"n").join("").split(B+"r").join("")
+              .split(B+"t").join("").split(B+'"').join("").trim()==="";
+}
+function __wbDropReminder(s,role,emptyOnly){
+  let pos=0;
+  for(;;){
+    const a=s.indexOf(role,pos);
+    if(a<0)return s;
+    const open=s.lastIndexOf("<system-reminder",a);
+    const gt=s.indexOf(">",a);
+    if(open<0||gt<0){pos=a+role.length;continue;}
+    if(s.slice(open,gt).indexOf(role)<0){pos=a+role.length;continue;}
+    const close=s.indexOf("</system-reminder>",gt);
+    if(close<0){pos=a+role.length;continue;}
+    const end=close+"</system-reminder>".length;
+    if(emptyOnly&&!__wbBlank(s.slice(gt+1,close))){pos=end;continue;}
+    s=s.slice(0,open)+s.slice(end);
+    pos=open;
+  }
+}
 function __wbStripUserContext(s){
-  return typeof s==="string"?s.replace(/<system-reminder\s+data-role="user-context">[\s\S]*?<\/system-reminder>\s*/g,""):s;
+  return typeof s==="string"?__wbDropReminder(s,"user-context",false):s;
 }
 function __wbStripLegacyAny(x){
   if(typeof x==="string")return __wbStripUserContext(__wbStripLegacyString(x));
@@ -257,10 +310,26 @@ def patch(data):
     if MARK.encode() not in data:
         if ANCHOR not in data:
             raise SystemExit("[FAIL] module header anchor not found")
-        data = data.replace(ANCHOR, ANCHOR + HELPER.encode(), 1)
+        data = data.replace(ANCHOR, ANCHOR + HELPER.encode() + SCRUB.encode(), 1)
         log.append(("helper", "patched"))
     else:
-        log.append(("helper", "already"))
+        # 已经打过补丁的 chunk 里，helper 是**旧版本**的代码。只加新东西不够：
+        # 修好的 bug 在 helper 内部，必须整段换成仓库里的当前文本，否则永远停在旧逻辑。
+        b = data.find(HELPER_BEGIN.encode())
+        e = data.find(HELPER_END.encode())
+        if b < 0 or e < b:
+            raise SystemExit("[FAIL] helper markers not found in patched chunk")
+        current = data[b:e + len(HELPER_END)]
+        if b"__wbBlank" not in current:
+            data = data.replace(current, HELPER.encode(), 1)
+            log.append(("helper-upgrade", "patched"))
+        else:
+            log.append(("helper", "already"))
+        if b"__wbScrubFetch" not in data:
+            data = data.replace(HELPER_END.encode(), SCRUB.encode() + HELPER_END.encode(), 1)
+            log.append(("fetch-scrub", "patched"))
+        else:
+            log.append(("fetch-scrub", "already"))
 
     for kind, var in (("non-stream", "g"), ("stream", "w")):
         old = ("systemInstructions:%s.modelInput.instructions," % var).encode()
@@ -289,6 +358,10 @@ def is_patched(data):
         version_of(data) == TRIM_VERSION
         and data.count(b"systemInstructions:__wbStripLegacyAny(") == 2
         and data.count(b"input:__wbCleanRuntimeInput(") == 2
+        # 出口清理与结构扫描是这一层的关键；缺了就算没打全（老 v3 只有正则版）。
+        and data.count(b"__wbScrubFetch") >= 2
+        and b"__wbBlank" in data
+        and b"__wbDropReminder" in data
     )
 
 
@@ -383,9 +456,21 @@ def self_test():
         "if(e2!=='<user_query>%s</user_query>')throw new Error('exact block residue: '+JSON.stringify(e2));" % "输出上轮末尾到本条消息的提示词",
         "const o5=JSON.stringify(__wbCleanRuntimeInput([mk(%s),asst,mk(exact)]).filter(x=>x.role==='user'));" % json.dumps(first_turn),
         "if(o5.includes('additional-data')||o5.includes('current_time'))throw new Error('exact block survived runtime clean');",
+        "// 出口清理：fetch 的请求体里不能留下这些标记",
+        "let seen=null;",
+        "globalThis.fetch=async function(u,i){seen=i&&i.body;return{ok:true};};",
+        "globalThis.fetch.__wbScrubbed=false;",
+        "__wbScrubFetch();",
+        "await globalThis.fetch('x',{method:'POST',body:JSON.stringify({input:[{role:'user',content:[{type:'text',text:exact}]}]})});",
+        "if(!seen||seen.includes('current_time')||seen.includes('additional-data'))throw new Error('fetch body not scrubbed: '+seen);",
+        "if(!seen.includes('user_query'))throw new Error('fetch scrub lost the user query');",
+        "const plain='{\"a\":1}';",
+        "seen=null;",
+        "await globalThis.fetch('x',{method:'POST',body:plain});",
+        "if(seen!==plain)throw new Error('clean fetch body was rewritten');",
         "console.log('SELF TEST OK');",
     ]
-    js = HELPER + "\n" + "\n".join(lines) + "\n"
+    js = HELPER + SCRUB + "\n" + "\n".join(lines) + "\n"
     tmp = os.path.join(ROOT, "tmp-helper-test.mjs")
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(js)

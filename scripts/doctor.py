@@ -46,6 +46,7 @@ CLI_ANCHORS = [
     ("helper", "__wbStripLegacyString", 1),
     ("instructions", "systemInstructions:__wbStripLegacyAny(", 2),
     ("input", "input:__wbCleanRuntimeInput(", 2),
+    ("fetch-scrub", "__wbScrubFetch", 2),
 ]
 
 PASS, FAIL, WARN, SKIP, MISSING = "PASS", "FAIL", "WARN", "SKIP", "MISSING"
@@ -519,10 +520,11 @@ def main():
         verdict, reason = "UNPROVEN", "; ".join(unproven)
     else:
         verdict, reason = "EFFECTIVE", "所有层已生效，最新请求也已干净"
-    emit("结论      : %s" % verdict)
-    emit("原因      : %s" % reason)
     report["verdict"], report["reason"] = verdict, reason
 
+    # 结论放最上面：窗口第一屏就能看到，不用滚到底。
+    head, rest = lines[:3], lines[3:]
+    lines = head + ["", "结论      : %s" % verdict, "原因      : %s" % reason] + rest
     text = "\n".join(lines)
     print(text)
     if args.write_report:
