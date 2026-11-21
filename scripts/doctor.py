@@ -192,6 +192,8 @@ def cli_state(path):
         "scrub": data.count(b"__wbScrubFetch") >= 2,
         "blank": b"__wbBlank" in data,
         "drop": b"__wbDropReminder" in data,
+        # 轻量兜底：头部插入的 fetch 清理（不依赖任何锚点）
+        "lite": b"__wbTrimLite" in data,
     }
 
 
@@ -225,22 +227,30 @@ def layer_cli(root):
     for path in chunks:
         st = cli_state(path)
         bad = cli_problems(st)
+        # 只打了"轻量出口清理"时，模型边界仍然被清（WARN，不是 FAIL）：
+        # 这种构建是锚点对不上才退到轻量修法，不该让人以为完全没生效。
+        lite_only = bool(bad) and st["lite"]
+        state = PASS if not bad else (WARN if lite_only else FAIL)
         rows.append({"where": os.path.basename(path),
-                     "state": PASS if not bad else FAIL,
+                     "state": state,
                      "detail": "bytes=%d version=%d mtime=%s%s"
                                % (st["bytes"], st["version"], ts(st["mtime"]),
-                                  "" if not bad else "  ← " + ",".join(bad))})
+                                  "" if not bad else
+                                  ("  ← 仅轻量出口清理（" + ",".join(bad) + "）" if lite_only
+                                   else "  ← " + ",".join(bad))),
+                     "lite_only": lite_only})
+        sub_ok = lambda ok: PASS if ok else (WARN if lite_only else FAIL)
         rows.append({"where": "    instructions",
-                     "state": PASS if (st["ins_raw"] == 0 and st["ins_wrapped"]) else FAIL,
+                     "state": sub_ok(st["ins_raw"] == 0 and st["ins_wrapped"]),
                      "detail": "wrapped=%d raw=%d (raw 必须 0)" % (st["ins_wrapped"], st["ins_raw"])})
         rows.append({"where": "    input",
-                     "state": PASS if (st["in_raw"] == 0 and st["in_wrapped"]) else FAIL,
+                     "state": sub_ok(st["in_raw"] == 0 and st["in_wrapped"]),
                      "detail": "wrapped=%d raw=%d (raw 必须 0)" % (st["in_wrapped"], st["in_raw"])})
         rows.append({"where": "    fetch-scrub",
-                     "state": PASS if st["scrub"] else FAIL,
+                     "state": sub_ok(st["scrub"]),
                      "detail": "present=%s" % st["scrub"]})
         rows.append({"where": "    helper",
-                     "state": PASS if (st["helper"] and st["blank"] and st["drop"]) else FAIL,
+                     "state": sub_ok(st["helper"] and st["blank"] and st["drop"]),
                      "detail": "v3=%s blank=%s drop=%s" % (st["helper"], st["blank"], st["drop"])})
     return rows, chunks
 
@@ -299,17 +309,26 @@ def processes():
     return rows
 
 
-def layer_process(procs, chunk_mtime):
-    """返回 (rows, stale_pids)。"""
+def layer_process(procs, root_mtimes):
+    """返回 (rows, stale_pids)。只比较"进程所在安装"的 chunk 修改时间。"""
     if not procs:
         return [{"where": "进程", "state": SKIP, "detail": "WorkBuddy / codebuddy 均未运行"}], []
     rows, stale = [], []
     for p in procs:
+        path = (p.get("path") or "").lower()
+        owner = ""
+        for root in root_mtimes:
+            if path.startswith(root.lower().rstrip("\\") + "\\"):
+                owner = root
+                break
+        if not owner:
+            continue
+        mtime = root_mtimes.get(owner) or 0.0
         try:
             started = _dt.datetime.strptime(p["started"], "%Y-%m-%d %H:%M:%S").timestamp()
         except Exception:
             started = None
-        if chunk_mtime and started and started < chunk_mtime:
+        if mtime and started and started < mtime:
             state, note = WARN, "早于补丁时间 → 仍加载旧 chunk"
             stale.append(p["pid"])
         else:
@@ -317,6 +336,9 @@ def layer_process(procs, chunk_mtime):
         kind = "prewarm" if "--prewarm" in (p["cmd"] or "") else "interactive"
         rows.append({"where": "    %s pid=%d (%s)" % (p["name"], p["pid"], kind),
                      "state": state, "detail": "%s  %s" % (p["started"], note)})
+    if not rows:
+        rows.append({"where": "进程", "state": SKIP,
+                     "detail": "运行中的进程不属于本次检查的安装"})
     return rows, stale
 
 
@@ -376,8 +398,11 @@ def layer_helper(chunks):
         text = open(path, encoding="utf-8", errors="replace").read()
         i, j = text.find(begin), text.find(end)
         if i < 0 or j < 0:
-            rows.append({"where": os.path.basename(path), "state": MISSING,
-                         "detail": "chunk 里没有清理 helper（未打补丁？）"})
+            lite = "__wbTrimLite" in text
+            rows.append({"where": os.path.basename(path),
+                         "state": WARN if lite else MISSING,
+                         "detail": ("只有轻量出口清理（__wbTrimLite），没有完整 helper"
+                                    if lite else "chunk 里没有清理 helper（未打补丁？）")})
             continue
         js = text[i:j + len(end)] + "\n" + HELPER_TEST.replace("__EXACT__", json.dumps(exact))
         tmp = os.path.join(tempfile.gettempdir(), "wb-doctor-helper.mjs")
@@ -493,7 +518,7 @@ def main():
             emit("                  %s" % loc)
         emit(r'            若安装在别处：scripts\doctor.cmd --install "<安装根目录>"')
 
-    global_problems, per_install, unproven = [], {}, []
+    global_problems, per_install, unproven, warnings = [], {}, [], []
 
     emit("")
     emit("[1] 提示词模板（缓存 prompt.tpl，八个块必须 0）")
@@ -504,15 +529,20 @@ def main():
             global_problems.append("templates %s: %s" % (r["where"].strip(), r["detail"]))
 
     chunk_paths = []
+    root_mtimes = {}
     for root in roots:
         emit("")
         emit("[2] CLI 运行时  %s" % root)
         c_rows, chunks = layer_cli(root)
         chunk_paths.extend(chunks)
+        if chunks:
+            root_mtimes[root] = max(os.path.getmtime(c) for c in chunks)
         for r in c_rows:
             emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
             if r["state"] in (FAIL, MISSING):
                 per_install.setdefault(root, []).append("cli %s: %s" % (r["where"].strip(), r["detail"]))
+            elif r["state"] == WARN:
+                warnings.append("cli %s: %s" % (r["where"].strip(), r["detail"]))
 
         emit("")
         emit("[3] app.asar  %s" % root)
@@ -528,7 +558,7 @@ def main():
     procs = processes()
     emit("")
     emit("[4] 进程（补丁是否真的被加载）")
-    p_rows, stale = layer_process(procs, chunk_mtime)
+    p_rows, stale = layer_process(procs, root_mtimes)
     for r in p_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
     if stale:
@@ -560,6 +590,8 @@ def main():
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
         if r["state"] in (FAIL, MISSING):
             global_problems.append("helper %s: %s" % (r["where"].strip(), r["detail"]))
+        elif r["state"] == WARN:
+            warnings.append("helper %s: %s" % (r["where"].strip(), r["detail"]))
 
     emit("")
     emit("[8] 判读规则（先看这里，再决定下一步）")
@@ -569,7 +601,8 @@ def main():
     emit("    [4] WARN 早于补丁     → 那个进程还在跑旧代码；开新聊天或重启应用")
     emit("    [5] idle prewarm>0    → 新聊天会复用旧 chunk；deploy 会自动停，也可手动 --apply")
     emit("    [6] 计数>0            → 这些块确实还在发给模型，按上面行号往上查")
-    emit("    [7] FAIL              → 磁盘上那份运行时删不掉该块，补丁没生效")
+    emit("    [7] FAIL              → 磁盘上那份运行时删不掉该块，补丁没生效；")
+    emit("                            可跑 scripts\wb-fix-lite.cmd（免 Python/Node、不依赖锚点）")
     emit("    若 [6][7] 全 PASS 而模型回答里仍有该块：")
     emit("      · 先排除旧聊天（旧会话历史里本来就存着它）——新开一个聊天再看；")
     emit("      · 仍出现则说明块是云端在服务端拼 prompt 时加的，本地删不掉；")
@@ -616,7 +649,10 @@ def main():
     elif unproven:
         verdict, reason = "UNPROVEN", "; ".join(unproven)
     else:
-        verdict, reason = "EFFECTIVE", "所有层已生效，最新请求也已干净"
+        verdict = "EFFECTIVE"
+        reason = "所有层已生效，最新请求也已干净"
+        if warnings:
+            reason += "；另有提示：" + "; ".join(warnings)
     report["verdict"], report["reason"] = verdict, reason
 
     # 结论放最上面：窗口第一屏就能看到，不用滚到底。

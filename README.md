@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.12**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.13**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -161,6 +161,12 @@ package.json       nunjucks 依赖与 npm scripts
 > 空缓存（新电脑冷启动）或模板里仍有被删块 → **硬失败**并提示先启动一次客户端。
 > 没有系统 Python 时优先用安装自带的 `resources\vendor\python\python.exe`。
 > CLI 补丁不再假设 chunk id `1849` 与混淆变量 `g`/`w`，改为按语句前缀和调用点现场发现。
+>
+> **v1.3.13 追加（零依赖兜底）**：`scripts\wb-fix-lite.cmd` 只需要 Windows 自带 PowerShell，
+> 不需要 Python / Node，也不依赖任何 chunk 文件名、chunk id、混淆变量名或代码锚点——
+> 它把一段自包含的 fetch 清理**插在 chunk 最前面**，任何构建都能生效。带备份、可 `-Restore`、
+> 写入后校验"原文一字不差跟在后面"，有 Node 时再跑 `node --check`，失败自动回滚。
+> `deploy.ps1` 的锚点补丁失败时会自动退到这条；`doctor.py` 把"只有轻量补丁"标成 WARN 而不是 FAIL。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。

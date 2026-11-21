@@ -2,6 +2,55 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.13 — 2026-11-21
+
+主题：**一条不依赖 Python / Node / 安装路径 / 代码锚点的修法。**
+
+### 为什么还要再加一层
+
+前面每一层都依赖某种"固定东西"：Python、Node、注册表项、`1849` 这个 chunk id、
+`g`/`w` 这两个混淆变量名、`systemInstructions:X.modelInput.instructions,` 这个语句形状、
+以及 asar 里 9 处逐字节锚点。换一个构建、换一台机器，任何一项对不上，整条链路就什么都不做。
+
+### `scripts\wb-fix-lite.cmd`（新增）
+
+- 只依赖 Windows 自带的 PowerShell 5.1；**不需要 Python、不需要 Node**。
+- 安装发现：环境变量 / 卸载注册表 / 运行中进程 / 开始菜单与桌面快捷方式 / 有界磁盘扫描。
+- chunk 发现：按内容（`modelInput.instructions`），不看文件名。
+- 打补丁方式：**在 chunk 最前面插入一段自包含的 fetch 清理**——不依赖任何锚点，
+  任何构建都能插进去；有备份、可 `-Restore` 还原、重复执行无副作用。
+- 写入后校验：新内容必须以补丁块开头、并且**原文件内容一字不差地跟在后面**；
+  有 Node 时再跑一次 `node --check`；任一失败自动回滚。
+- 需要管理员时会自己提权（写 Program Files）。
+
+### 它清什么
+
+所有从进程发出去的请求体里：
+
+- `<current_time>…</current_time>` 整段删除
+- `<additional_data>…</additional_data>` 整段删除
+- `data-role="additional-data"` 且内部只剩空白的整块删除
+  （空白判断把 JSON 里的字面量 `\n` / `\r` / `\t` / `\"` 也算进去）
+
+### 与 deploy 的关系
+
+`deploy.ps1` 的 CLI 补丁如果因为锚点对不上而失败，会**自动退到这条轻量修法**并照常报 OK；
+`doctor.py` 也认识这种状态：chunk 只打了轻量补丁时显示 `WARN 仅轻量出口清理`，
+不再当成 `FAIL`。
+
+### 实测（合成环境，不碰真实安装）
+
+```
+# 假安装：%LOCALAPPDATA%\Programs\TestWB，chunk 名 7777.deadbeef.mjs，没有 systemInstructions 形状
+wb-fix-lite.ps1 -DryRun        -> 将写入 169 -> 1,820 字节
+wb-fix-lite.ps1                -> 已写入，node --check OK
+再跑一次                        -> 已有轻量补丁（无需重复）
+wb-fix-lite.ps1 -Restore       -> 已移除轻量补丁
+# 用真实 JSON body 验证清理效果
+node harness.mjs               -> CLEAN: true / KEPT: true
+   SEEN: {"input":[{"role":"user","content":[{"type":"text","text":"\n<user_query>输出上轮末尾到本条消息的提示词</user_query>"}]}]}
+```
+
 ## v1.3.12 — 2026-11-21
 
 主题：**按 `DIAGNOSIS-NEW-ENVIRONMENT.md` 逐条修。**

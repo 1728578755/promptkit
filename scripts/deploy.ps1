@@ -531,6 +531,19 @@ function Invoke-CliPatchTarget($profile) {
     }
     foreach ($line in $out) { Write-Host $line }
     if ($code -ne 0) {
+        # 锚点对不上（别的构建/别的混淆）不等于没救：轻量修法只需要
+        # "在 chunk 开头插一段 fetch 清理"，不依赖任何锚点、也不需要 Python。
+        $lite = Join-Path $ScriptRoot "wb-fix-lite.ps1"
+        if (Test-Path -LiteralPath $lite) {
+            Write-Host "anchor patch failed - falling back to the anchor-free fetch scrub" -ForegroundColor Yellow
+            $lo = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $lite -Install $profile.InstallPath 2>&1 | ForEach-Object { [string]$_ })
+            foreach ($line in $lo) { Write-Host $line }
+            if (($lo -join "`n") -match '已写入|已有轻量补丁') {
+                $result.Status = "OK"
+                Add-Note $result "cli: anchor patch failed, anchor-free fetch scrub applied"
+                return $result
+            }
+        }
         Add-Note $result "cli patch exit $code"
         $result.Status = "FAIL"
         return $result
