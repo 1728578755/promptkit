@@ -2,6 +2,56 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.8 — 2026-11-21
+
+主题：**在“另一台电脑”上真正打上补丁 —— 不再按文件名找 chunk，部署结束自动逐层验收。**
+
+### 根因
+
+- 上一版仍按 `1849.*.mjs` 找 CLI chunk。WorkBuddy 升级会改 id/哈希，别的电脑上
+  文件名不同时，`deploy` 只打一行 `cli runtime chunk not found` 就 **SKIP**，
+  退出码仍是 0 —— 看起来部署成功，实际模型边界一个补丁都没打，块当然还在。
+- 已经起着的 prewarm 助手握着旧 chunk，新聊天命中它时同样看不到补丁。
+
+### 改了什么
+
+- `patch-cli-trim.py`：目录发现改为**递归 + 按内容**
+  （`modelInput.instructions` + `modelInput.input`），不再依赖任何文件名；
+  目录默认值改为 `…\cli\dist`。
+- `deploy.ps1`：`Invoke-CliPatchTarget` 把 `cli\dist` 整个目录交给 Python，
+  找不到就是 **FAIL**，不再静默 SKIP；打完自动跑
+  `refresh-cli-prewarm.py --apply`（只停 `kind=prewarm`+`status=idle`，按 PID，不动主程序和当前聊天）。
+- 新增 `scripts/verify-stack.py`：一条命令逐层验收
+  （CLI `version`/`status`、asar 9 个补丁逐个、integrity/exe 清单、最新 trace 的
+  `current_time`/`additional-data`/`user-context` 计数），输出 `RESULT: PASS|FAIL`，
+  同时写 `reports/verify-latest.txt`。`deploy.cmd` 结束时自动调用。
+- `--self-test` 增加**用户原样 182 字符消息**断言：
+  `<system-reminder data-role="additional-data">` + `<current_time>` + `<user_query>` 清理后
+  必须只剩 `<user_query>…</user_query>`。
+
+### 在另一台电脑上怎么用（一次）
+
+```bat
+:: 1. 完全退出 WorkBuddy（asar 层需要；CLI 层不需要）
+:: 2. 解压 promptkit-v1.3.8.zip，右键管理员运行
+scripts\deploy.cmd
+```
+
+结束时屏幕最后会有一段验收：
+
+```text
+== WorkBuddy prompt-trim acceptance ==
+self-test : SELF TEST OK
+install   : C:\Program Files\WorkBuddy
+  cli     : version=3 status=PATCHED
+  asar    : integ=MATCH exe=MATCH
+            current-time-cloud   ok
+trace note: clean
+RESULT    : PASS
+```
+
+`RESULT: PASS` 才是成功；`FAIL` 会直接写明哪一层、为什么（应用在运行 / 找不到 chunk / 锚点变了）。
+
 ## v1.3.7 — 2026-11-21
 
 主题：**`current_time` 的 `data-role="additional-data"` 空壳彻底清掉；别的电脑/别的版本也能打。**

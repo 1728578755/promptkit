@@ -491,21 +491,22 @@ function Invoke-CliPatchTarget($profile) {
         $result.Status = "FAIL"
         return $result
     }
-    # 每个安装有自己的运行时 chunk：不传 --file 就会都用脚本里的默认 CN 路径，
-    # AI 版永远打不到（实测 D:\Program Files\WorkBuddyAI 下有一份未打的 1849.*.mjs）。
-    $chunkDir = Join-Path $profile.InstallPath "resources\app.asar.unpacked\cli\dist\lazy-lite-wb"
-    $chunks = @(Get-ChildItem -LiteralPath $chunkDir -Filter "1849.*.mjs" -ErrorAction SilentlyContinue)
-    if ($chunks.Count -eq 0) {
-        Add-Note $result "cli runtime chunk not found (this build)"
-        $result.Status = "SKIP"
+    # 不按文件名（1849.*.mjs）找 chunk：WorkBuddy 升级会改 id/哈希，别的电脑也可能
+    # 装在 D:\ 或是 AI 版。把 dist 目录交给 Python，由内容（modelInput.instructions +
+    # modelInput.input）定位；找不到就算 FAIL，绝不静默 SKIP。
+    $unpacked = Join-Path $profile.InstallPath "resources\app.asar.unpacked"
+    $distDir = Join-Path $unpacked "cli\dist"
+    if (-not (Test-Path -LiteralPath $distDir)) { $distDir = $unpacked }
+    if (-not (Test-Path -LiteralPath $distDir)) {
+        Add-Note $result "app.asar.unpacked not found under $($profile.InstallPath)"
+        $result.Status = "FAIL"
         return $result
     }
-    $chunkGlob = Join-Path $chunkDir "1849.*.mjs"
     $prevIo = $env:PYTHONIOENCODING
     $env:PYTHONIOENCODING = "utf-8"
     $out = @()
     try {
-        $cliArgs = @("-X", "utf8", $script, "--apply", "--file", $chunkGlob)
+        $cliArgs = @("-X", "utf8", $script, "--apply", "--file", $distDir)
         if ($DryRun) { $cliArgs += "--dry-run" }
         $out = @(& $py @cliArgs 2>&1 | ForEach-Object { [string]$_ })
         $code = $LASTEXITCODE
@@ -518,14 +519,22 @@ function Invoke-CliPatchTarget($profile) {
         $result.Status = "FAIL"
         return $result
     }
-    $st = @(& $py -X utf8 $script --status --file $chunkGlob 2>&1 | ForEach-Object { [string]$_ })
+    $st = @(& $py -X utf8 $script --status --file $distDir 2>&1 | ForEach-Object { [string]$_ })
     if (@($st | Where-Object { $_ -match '^status:\s+PATCHED' }).Count -eq 0) {
         Add-Note $result "cli patch did not verify"
         $result.Status = "FAIL"
         return $result
     }
+    # 已经起着的 prewarm 助手还握着旧 chunk；只停 kind=prewarm + status=idle 的进程
+    # （按 PID），不碰主程序、也不碰当前聊天。下一次新聊天就会加载已打补丁的运行时。
+    $refresh = Join-Path $ScriptRoot "refresh-cli-prewarm.py"
+    if ((Test-Path -LiteralPath $refresh) -and -not $DryRun) {
+        $pr = @(& $py -X utf8 $refresh --apply --config-dir $profile.ConfigDir 2>&1 | ForEach-Object { [string]$_ })
+        $stopped = @($pr | Where-Object { $_ -match '^stopped:' })
+        if ($stopped.Count -gt 0) { Add-Note $result ("prewarm " + $stopped[0]) }
+    }
     $result.Status = "OK"
-    Add-Note $result "cli runtime trimmed; restart the app or open a new chat to load it"
+    Add-Note $result "model boundary trimmed; open a NEW chat to load it"
     return $result
 }
 
@@ -553,6 +562,45 @@ function Start-WorkBuddyIfClosed($profiles) {
         Write-Host ("App already running: {0}" -f ($running -join ", ")) -ForegroundColor DarkGray
     }
     return $false
+}
+
+function Invoke-StackVerify($profiles) {
+    # 收口验收：把每一层的真实状态打出来。模型说“还在”不算证据，脚本读文件/读 trace 才算。
+    $script = Join-Path $ScriptRoot "verify-stack.py"
+    if (-not (Test-Path -LiteralPath $script)) {
+        Write-Host "verify-stack.py not present - acceptance skipped" -ForegroundColor Yellow
+        return 0
+    }
+    $py = $null
+    foreach ($p in $profiles) {
+        if ($p.ConfigDir) { $py = Get-PythonExe $p.ConfigDir; if ($py) { break } }
+    }
+    if (-not $py) { $py = Get-PythonExe $null }
+    if (-not $py) {
+        Write-Host "python not found - acceptance skipped" -ForegroundColor Yellow
+        return 0
+    }
+    $report = Join-Path $ProjectRoot "reports\verify-latest.txt"
+    $dir = Split-Path -Parent $report
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $prev = $env:PYTHONIOENCODING
+    $env:PYTHONIOENCODING = "utf-8"
+    try {
+        $out = @(& $py -X utf8 $script 2>&1 | ForEach-Object { [string]$_ })
+        $code = $LASTEXITCODE
+    } finally {
+        if ($null -eq $prev) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prev }
+    }
+    foreach ($line in $out) {
+        $color = "Gray"
+        if ($line -match '^RESULT\s*:\s*PASS') { $color = "Green" }
+        elseif ($line -match '^RESULT\s*:\s*FAIL') { $color = "Red" }
+        elseif ($line -match 'RAW$') { $color = "Red" }
+        Write-Host $line -ForegroundColor $color
+    }
+    try { Set-Content -LiteralPath $report -Value $out -Encoding UTF8 } catch { }
+    Write-Host ("acceptance report: {0}" -f $report) -ForegroundColor DarkGray
+    return $code
 }
 
 # --- list ---
@@ -614,6 +662,15 @@ foreach ($r in $results) {
 }
 
 $failed = @($results | Where-Object { $_.Status -eq "FAIL" }).Count
+
+# 逐层验收：cli 的 version/status、asar 的每个补丁、最新 trace 的标记计数，一次打出来。
+# 只对写盘动作跑，-DryRun 不跑；验收红也算失败，避免“看起来成功”。
+$writeActions = @("deploy", "cli-patch", "asar", "asar-restore", "restore")
+if (($writeActions -contains $action) -and -not $DryRun) {
+    Write-Host ""
+    $verifyCode = Invoke-StackVerify $profiles
+    if ($verifyCode -ne 0) { $failed += 1 }
+}
 
 # 结束即拉起：写盘类动作（deploy / cli-patch / asar / asar-restore / restore）跑完就启动应用；
 # 失败也启动——脚本结束时就该能看到结果，而不是再手动点一次图标。

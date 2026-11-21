@@ -13,8 +13,10 @@ conversation history or the UI.
 
 Target
 ------
-<install>/resources/app.asar.unpacked/cli/dist/lazy-lite-wb/1849.*.mjs
-(the agent runtime chunk that builds `modelInput.instructions` / `.input`).
+<install>/resources/app.asar.unpacked/cli/dist/**  (the agent runtime chunk that
+builds `modelInput.instructions` / `.input`).  The file name is discovered by
+content, so another WorkBuddy version, another install path, or the AI edition
+gets patched too instead of silently skipped.
 
 What it strips
 --------------
@@ -50,7 +52,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BACKUPS = os.path.join(ROOT, "backups")
-DEFAULT_GLOB = r"C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\dist\lazy-lite-wb\1849.*.mjs"
+DEFAULT_GLOB = r"C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\dist"
 
 MARK = "__wbStripLegacyString"
 TRIM_VERSION = 3
@@ -174,7 +176,33 @@ def write(path, data):
     os.replace(tmp, path)
 
 
+SKIP_DIRS = {"node_modules", ".git", "renderer", "locales", "assets"}
+MAX_DEPTH = 6
+MAX_FILE = 24 * 1024 * 1024
+
+
+def carries_runtime(path):
+    """True when this file is the agent runtime that builds modelInput."""
+    try:
+        if os.path.getsize(path) > MAX_FILE:
+            return False
+        data = read(path)
+    except OSError:
+        return False
+    return b'modelInput.instructions' in data and b'modelInput.input' in data
+
+
 def find_targets(pattern):
+    """Resolve a chunk path / glob / directory to the runtime chunk(s).
+
+    Never trust the file name.  A WorkBuddy update renames the chunk
+    (``1849.<hash>.mjs`` -> another id/hash) and another machine may install to
+    a different folder (D:\\, the AI edition, a per-user install).  Only the
+    content identifies the runtime, so a directory is walked recursively until
+    the file carrying ``modelInput.instructions`` + ``modelInput.input`` shows
+    up.  This is what makes the patch work on someone else's computer instead of
+    silently skipping.
+    """
     if os.path.isfile(pattern):
         return [pattern]
     if os.path.isdir(pattern):
@@ -185,18 +213,22 @@ def find_targets(pattern):
         hits = sorted(p for p in glob.glob(pattern) if os.path.isfile(p))
         if hits:
             return hits
-    # 版本升级会改 chunk 的哈希名；按内容找承载运行时的那一个，保证别的电脑/别的
-    # WorkBuddy 版本也能打上，而不是静默跳过。
     if not os.path.isdir(folder):
         return []
-    for path in sorted(glob.glob(os.path.join(folder, "*.mjs"))):
-        try:
-            data = read(path)
-        except OSError:
-            continue
-        if b'modelInput.instructions' in data and b'modelInput.input' in data:
-            hits.append(path)
-    return hits
+    base = os.path.abspath(folder).rstrip("\\/")
+    base_depth = base.count(os.sep)
+    for root, dirs, files in os.walk(base):
+        depth = root.count(os.sep) - base_depth
+        if depth >= MAX_DEPTH:
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
+        for name in sorted(files):
+            if not name.endswith(".mjs"):
+                continue
+            path = os.path.join(root, name)
+            if carries_runtime(path):
+                hits.append(path)
+    return sorted(set(hits))
 
 
 def node_check(path):
@@ -305,6 +337,16 @@ def self_test():
         "<user_query>second</user_query>"
     )
     reminder_only = '<system-reminder data-role="hook">tick</system-reminder>'
+    # 用户 17:38 在另一台电脑上看到的原样 182 字符消息：additional-data 里只有
+    # current_time，紧跟着 <user_query>。清理后必须只剩 user_query 本身。
+    exact = (
+        '<system-reminder data-role="additional-data">' + chr(10) +
+        '<current_time>' + chr(10) +
+        'Saturday, November 21, 2026 at 17:38:43 GMT+8' + chr(10) +
+        '</current_time>' + chr(10) +
+        '</system-reminder>' + chr(10) +
+        '<user_query>输出上轮末尾到本条消息的提示词</user_query>'
+    )
     only_time = (
         '<system-reminder data-role="additional-data">' + chr(10) +
         '<current_time>Saturday, November 21, 2026 at 17:17:54 GMT+8</current_time>' + chr(10) +
@@ -334,6 +376,13 @@ def self_test():
         "if(o4.length!==3)throw new Error('reminder-only message should be dropped, got '+o4.length);",
         "const sys=__wbStripLegacyAny('<current_time>now</current_time><user_query>x</user_query>');",
         "if(sys.includes('current_time'))throw new Error('system current_time kept');",
+        "const exact=%s;" % json.dumps(exact),
+        "const e1=__wbStripLegacyString(exact);",
+        "if(e1.includes('current_time')||e1.includes('additional-data'))throw new Error('exact user block kept: '+e1);",
+        "const e2=e1.trim();",
+        "if(e2!=='<user_query>%s</user_query>')throw new Error('exact block residue: '+JSON.stringify(e2));" % "输出上轮末尾到本条消息的提示词",
+        "const o5=JSON.stringify(__wbCleanRuntimeInput([mk(%s),asst,mk(exact)]).filter(x=>x.role==='user'));" % json.dumps(first_turn),
+        "if(o5.includes('additional-data')||o5.includes('current_time'))throw new Error('exact block survived runtime clean');",
         "console.log('SELF TEST OK');",
     ]
     js = HELPER + "\n" + "\n".join(lines) + "\n"
@@ -356,7 +405,9 @@ def main():
     g.add_argument("--restore", action="store_true")
     g.add_argument("--status", action="store_true")
     g.add_argument("--self-test", action="store_true")
-    ap.add_argument("--file", default=DEFAULT_GLOB, help="chunk path or glob")
+    ap.add_argument("--file", default=DEFAULT_GLOB,
+                    help="chunk path, glob, or a directory (e.g. <install>\\resources\\app.asar.unpacked\\cli\\dist); "
+                         "content discovery finds the runtime chunk whatever it is named")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 

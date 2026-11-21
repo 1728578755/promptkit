@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.7**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.8**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -117,6 +117,18 @@ package.json       nunjucks 依赖与 npm scripts
 > `current-time-cloud` 等长补丁把这行改成 `0 … &&(…)`；CLI v3 同时把清空后的
 > `additional-data` 空壳整块删除。asar 补丁需关掉 WorkBuddy 后跑 `deploy.cmd` 才写入；
 > CLI v3 已在模型边界先清掉。chunk 查找改为按内容回退，别的版本/电脑也能打。
+>
+> **v1.3.8 追加（另一台电脑上没生效的根因）**：`deploy.ps1` 之前按 `1849.*.mjs` 找 CLI chunk，
+> 文件名一变就只打一句 `cli runtime chunk not found` 然后 **SKIP**，退出码仍是 0——看着成功，
+> 实际模型边界一个补丁都没打。现在改成把 `cli\dist` 整目录交给 `patch-cli-trim.py`，
+> **递归 + 按内容**（`modelInput.instructions` + `modelInput.input`）定位，找不到就 **FAIL**；
+> 打完自动 `refresh-cli-prewarm.py --apply`（只停 `kind=prewarm`+`status=idle`，按 PID）。
+> `deploy` 结束会自动跑 `scripts/verify-stack.py` 逐层验收：CLI `version=3/PATCHED`、
+> asar 9 个补丁逐个、`integ=MATCH`/`exe=MATCH`、最新 trace 的
+> `current_time`/`additional-data`/`user-context` 计数，最后打印 `RESULT: PASS|FAIL`
+> 并写 `reports/verify-latest.txt`。**只有 PASS 才算部署成功。**
+> `--self-test` 也加入了用户原样 182 字符消息（`data-role="additional-data"` + `<current_time>` + `<user_query>`）
+> 的断言：清理后必须只剩 `<user_query>…</user_query>`。
 >
 > **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
 > `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。
