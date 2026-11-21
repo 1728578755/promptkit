@@ -10,17 +10,8 @@
 //   node scripts/render-check.js --root <dir>    # render another copy of the package
 const fs = require("fs");
 const path = require("path");
-
-function loadNunjucks() {
-  const candidates = [
-    "nunjucks",
-    path.join(__dirname, "..", "node_modules", "nunjucks"),
-  ];
-  for (const c of candidates) {
-    try { return require(c); } catch { }
-  }
-  throw new Error("nunjucks not found. Run: npm install");
-}
+// 依赖与数据根的解析都在 _deps.js 里做，包内与工作区共用同一份脚本实现。
+const { loadNunjucks, dataFile } = require("./_deps");
 
 const nunjucks = loadNunjucks();
 const ROOT = path.resolve(__dirname, "..");
@@ -34,7 +25,10 @@ const dist = distIdx >= 0 ? path.resolve(args[distIdx + 1]) : "";
 // --root：从别处（如插件缓存快照）渲染，用于验证「部署出去的那份字节」也能组装成功
 const rootIdx = args.indexOf("--root");
 const RENDER_ROOT = rootIdx >= 0 ? path.resolve(args[rootIdx + 1]) : ROOT;
-const CONTEXT_FILE = path.join(RENDER_ROOT, "examples", "context.json");
+// --root 指向的树自带 examples/ 就用它的；没有则回退到数据根（工作区里是 release/examples）
+const CONTEXT_FILE = fs.existsSync(path.join(RENDER_ROOT, "examples", "context.json"))
+  ? path.join(RENDER_ROOT, "examples", "context.json")
+  : dataFile("examples/context.json");
 
 function findInteractionDir(mode) {
   const dir = path.join(RENDER_ROOT, "plugins", "workbuddy-builtin", "interactionmode", mode);

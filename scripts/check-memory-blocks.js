@@ -10,10 +10,12 @@
 // 用法：node scripts/check-memory-blocks.js
 const fs = require("fs");
 const path = require("path");
+// 依赖与数据根的解析都在 _deps.js 里做，包内与工作区共用同一份脚本实现。
+const { loadNunjucks, dataFile } = require("./_deps");
 
-const nunjucks = require("nunjucks");
+const nunjucks = loadNunjucks();
 const ROOT = path.resolve(__dirname, "..");
-const base = JSON.parse(fs.readFileSync(path.join(ROOT, "examples", "context.json"), "utf8"));
+const base = JSON.parse(fs.readFileSync(dataFile("examples/context.json"), "utf8"));
 
 function stripFrontmatter(src) {
   if (!src.startsWith("---")) return src;

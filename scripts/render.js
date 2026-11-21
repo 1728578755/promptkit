@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
-const nunjucks = require("nunjucks");
+// 依赖与数据根：包内 = 包根；工作区 = release/。两棵树跑的是同一份实现。
+const { loadNunjucks, dataRoot } = require("./_deps");
+const nunjucks = loadNunjucks();
 
-const ROOT = path.resolve(__dirname, "..");
+const ROOT = dataRoot();
 const DIST = path.join(ROOT, "dist");
 const CONTEXT_FILE = path.join(ROOT, "examples", "context.json");
 
@@ -87,7 +89,7 @@ function main() {
     }
   }
 
-  console.log(`\nRendered ${count} files to ${path.relative(ROOT, DIST)}/`);
+  console.log(`\nRendered ${count} files to ${path.join(DIST, "")}`);
 }
 
 try {

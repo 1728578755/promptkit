@@ -1,6 +1,6 @@
 # PromptKit · 桌面 AI 助手系统提示词框架
 
-> 当前版本 **v1.3.3**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.4**（2026-11-21）· 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。目标不是"写得更长"，而是让每一轮请求都更短、更稳定、更容易命中前缀缓存，同时把只在特定任务出现的过程放到技能里按需加载。
 
@@ -11,7 +11,7 @@ PromptKit 是一套面向桌面 AI 助手的系统提示词与技能源文件。
 
 | # | 要求 | 机器怎么验 |
 |---|---|---|
-| 1 | **完整性**：部署链路需要的输入全在包里——`welcome-mode/`、`fragments/`、`plugins/`、`runtime-templates/`、`overrides/`、`apply-product-overrides.py`、`patch-asar.py`、`_install.py`、全部渲染与诊断脚本 | `release-audit.js` 逐项检查 9 组共 69 个文件 |
+| 1 | **完整性**：部署链路需要的输入全在包里——`welcome-mode/`、`fragments/`、`plugins/`、`runtime-templates/`、`overrides/`、`apply-product-overrides.py`、`patch-asar.py`、`_install.py`、全部渲染与诊断脚本、两份用户文档 | `release-audit.js` 逐项检查 10 组共 75 个文件 |
 | 2 | **一致性**：包内提示词与部署链路必须与维护者源目录逐字节相同，不许"包里一份、源里一份" | workspace 模式下逐文件 SHA256 比对 |
 | 3 | **一键全量**：`deploy.cmd` 无参数必须带 `-Elevate`，一次 UAC 写完缓存 + 安装镜像 + `resources\templates\` + `product.json` + `app.asar` | 读 `deploy.cmd` 源码断言 |
 | 4 | **失败可见**：`deploy.cmd` 必须 `exit /b %RC%`，不许让 `pause` 把失败吞成 0 | 同上 |
@@ -56,6 +56,8 @@ overrides/         工具描述与技能描述的精简覆盖表（按 name 精�
 runtime-templates/ 运行时直接读取的 tpl（user-context / 模式提醒）
 scripts/           一键部署、asar 补丁、渲染、缓存量化与校验脚本
 examples/          示例渲染上下文
+HOWTO-修改系统提示词.md   改哪个文件 → 怎么应用 → 怎么验证（操作手册）
+TROUBLESHOOTING-not-effective.md  「改了不生效」的排查链与复用方法论
 CHANGELOG.md       版本记录
 package.json       nunjucks 依赖与 npm scripts
 ```
@@ -91,6 +93,27 @@ package.json       nunjucks 依赖与 npm scripts
 4. **`interactionmode-*/interaction.md` 的 frontmatter 不进正文**（宿主把它解析成工具集），所以它在正文里的位置不影响缓存。
 
 > **2026-11-21 用户要求再删五段**：`<tool_usage_policy>` / `<agent_skills>` / `<task_management>` / `<result_presentation>` / `<final_answer_instructions>` 整段移除。因此 A 层不再有 `tool-usage-policy` / `agent-skills` / `task-management`，B 层不再有 `result-presentation`；ask 模式不再有任何「最终答复」约束段。上表描述的是**移除后**的现行顺序。
+
+> **2026-11-21 追加：旧会话的 reminder 重放也要清，脚本结束自动拉起。**
+>
+> 模板层只影响新会话；已经打开的会话在创建时固定了系统提示，第一条用户消息里的
+> `<system-reminder data-role="user-context">` 也会随历史每个请求重发。`user-context-durable`
+> 只阻止"重新注入"，不阻止"历史重放"。
+>
+> `scripts/patch-cli-trim.py` 在 agent runtime 的 provider 边界清一次（`1849.*.mjs`）：
+> 第一轮保留 user-context；后续轮次从历史里整块删除；系统提示同时删五段 +
+> `<current_time>` + `<additional_data>`。`deploy.cmd -CliPatch` 一次 UAC 即可，不需要关应用；需要立刻让新聊天用上新 chunk 时跑 `python scripts/refresh-cli-prewarm.py --apply`（只停 `kind=prewarm` + `status=idle`，不碰主程序/当前聊天）。
+> 默认全量 deploy 也会在 asar 之前跑它。
+>
+> **自动拉起（2026-11-21 收口到一处）**：凡是会写盘的动作——`deploy`（全量）、`-CliPatch`、`-Asar`、
+> `-AsarRestore`、`-Restore`——结束时都检查应用是否在运行；没在运行就经 `explorer.exe` 启动一次。
+> **失败也启动**（脚本结束就该看到结果）；只读动作（`-Verify` / `-Pull` / `-ListTargets`）与 `-DryRun`
+> 不启动；`-NoRelaunch` 关闭。**从不结束进程**：应用在跑时 asar 补丁按 exit 4 拒绝写入，
+> 需要你自己完全退出后重跑。asar 的两处调用统一传 `--no-launch`，拉起只由脚本末尾做——
+> 这样 `uc-seen --seed` 与 `verify` 先跑完再开进程，也不会开成两个实例。
+> 已打开的旧聊天需要新开一个聊天或重启应用才能加载新 chunk。实测 `1849.*.mjs` 247,364 → 250,670 字节，
+> `--self-test` OK，真实 20,003 字符请求前缀清理后 17,672（删 2,331）。
+> 回归断言：`powershell -File scripts/test-launch-coverage.ps1`（20 条）。
 
 量化和断言（改顺序后必跑）：
 
@@ -145,6 +168,12 @@ npm run check         # 结构断言：无模板残留、关键段落、模式�
 ```
 
 `npm run render-check` 在渲染之外还断言：没有残留 `{{` / `{%`、任何模式都没有 `<content_policy>`，以及 2026-11-17 移除的三段（`<quality_policy>` / `<agent_loop>` / `<regional_conventions>`）在 CN 与 AI 两个档位、五个模式下都为 0——出现即退出码 1。
+
+**同一份脚本、两种布局**：本包根目录下有 `node_modules/` 与 `examples/`；维护者工作区里这两样在 `release/` 下面。
+`scripts/_deps.js` 是唯一判断这件事的地方（`loadNunjucks()` / `dataRoot()` / `dataFile()`），其余脚本都从它取，
+所以同一个文件能在两棵树里**逐字节相同**——`release-audit.js` 会逐个比对，没有豁免名单。
+这直接修掉了两类漂移：一边有 `--root`、另一边没有；中文表格一边按双宽对齐、另一边按字符数补空格。
+`--root <dir>` 仍然可用：目标树自带 `examples/context.json` 就用它的，没有则回退到数据根。
 
 ## 一键部署与恢复（Windows）
 
@@ -335,6 +364,8 @@ npm run runtime       # 渲染四个 tpl 并断言注入块已按预期去掉（
 | `slim-mcp-descriptions.py` | 精简 MCP 插件里被重复拼接的工具描述常量 |
 | `test-user-context-once.js` | 断言 `user-context-once` 补丁的判据仍在（改完提示词必跑） |
 | `test-asar-launch.py` | 断言「打完启动应用」链路：经 explorer 真拉起一个探针、exe 缺失/`--no-launch` 时跳过、源码里没有任何结束进程的调用（8 项） |
+| `test-launch-coverage.ps1` | 断言「脚本结束即拉起」的覆盖面：五个写盘动作都在名单、只读动作不在、`-DryRun` 不启动、拉起发生在失败退出之前、两处 asar 都传 `--no-launch`；并用 AST 取出真实的 `Start-WorkBuddyIfClosed` 跑四种场景（含"第一个在跑、第二个没跑"必须启动第二个）（20 项） |
+| `refresh-cli-prewarm.py` | 只停空闲的 `kind=prewarm` / `status=idle` CLI 助手，让下个聊天起新进程；不碰主程序与当前聊天 |
 | `trace-turns.py` | 按轮读 trace 的请求体，判断某块是首轮一次还是每轮都有（附实测：trace 只落每个会话的首个请求） |
 | `uc-seen.py` | `user-context-durable` 的标记管理：`--count` / `--seed` / `--clear <sid>` / `--prune 30` |
 

@@ -2,6 +2,71 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.4 — 2026-11-21
+
+主题：**旧会话不再重放 user-context / 五段；部署脚本结束时自动拉起。**
+
+用户原话：「system-reminder 仍然一堆东西都每轮重发，current_time 去掉反复说也没实现，脚本结束要自动拉起」，随后确认「是 WorkBuddy 不是 ZCode」。
+
+### 根因
+
+- 模板层的五段删除只影响新会话；14:20 创建的会话在 14:32 删段后仍固定旧系统提示，15:35 trace 仍带五段。
+- `user-context-durable` 只阻止"重新注入"，不阻止"历史重放"：dbe0f043 存储里 user-context 只有 1 份，但每个请求都随第一条用户消息重发。
+- 最新会话 dbe0f043 的 `<current_time>` 已为 0；旧会话 / 云端助手 / 项目详情页仍可能带。
+
+### 改了什么
+
+- 新增 `scripts/patch-cli-trim.py`：在 agent runtime chunk `1849.*.mjs` 的 provider 边界清理 `modelInput.instructions` 与 `.input`。
+  - 第一轮保留 user-context；后续轮次从历史用户消息整块删除；只含 reminder 的消息丢弃。
+  - 系统提示删五段 + `quality_policy` / `agent_loop` / `regional_conventions` + `<current_time>` + `<additional_data>`。
+  - 流式 / 非流式两处都包；`node --check` 失败回滚；提供 `--status` / `--apply` / `--restore` / `--self-test`。
+- `scripts/deploy.ps1`：新增 `-CliPatch` / `-SkipCliPatch`；另加 `scripts/refresh-cli-prewarm.py`（只停 `kind=prewarm` + `status=idle` 的助手，不碰主程序/当前聊天）；默认全量 deploy 在 asar 之前跑 CLI 补丁；新增 `Start-WorkBuddyIfClosed`，deploy / cli-patch 结束时如果应用没在运行就经 `explorer.exe` 自动拉起（**从不结束进程**）。
+- `scripts/release-manifest.js` + `sync-release.js`：新脚本随包发布，审计全覆盖。
+
+### 公开包与源目录：把两份实现合成一份（本轮新增）
+
+用户原话：「release 的功能内容不全，存在缺陷，跟目录的行为不一样，脚本结束要自动拉起」。
+
+- **新增 `scripts/_deps.js`**：唯一判断"nunjucks 在哪、数据根在哪"的地方（`loadNunjucks()` / `dataRoot()` / `dataFile()`）。
+  包根有 `node_modules/` 与 `examples/`，维护者工作区里这两样在 `release/` 下——以前每个脚本各写一遍候选路径，
+  于是同一份脚本在两个地方长成了两套实现。
+- **5 个脚本合并成逐字节相同的单一实现**：`render-check.js` / `cache-prefix.js` / `check-memory-blocks.js` /
+  `render-runtime-templates.js` / `render-tool-overrides.js`。`release-manifest.js` 里那份 `SCRIPT_DIFF_ALLOWED`
+  豁免名单**整份删除**，改由 `SYNC_FILES` 逐字节比对。
+- **两处真实漂移因此被修回**：
+  - 源的 `render-check.js` 丢过 `--root` 的上下文跟随（`--root` 渲染别的树时仍读本地 `examples/`）；现为"目标树有 examples 就用它，没有回退数据根"。
+  - 源的 `cache-prefix.js` 丢过中文双宽对齐（表格按字符数补空格，中文列错位）；现已与包内一致。
+- **`render.js` / `check.js` 搬进源目录**（原先只在包里）：用 `dataRoot()` 解析，源目录跑出的结果与包内完全一致（写到 `release/dist`）。
+- **审计新增反向断言**：不只看"清单里的文件都在包里"，还看"包里 `scripts/` 每个文件都在清单里"——
+  绕过清单塞进包、既不同步也不受审计的"第二份实现"会直接 fail。
+- **自动拉起收口到一处**（用户要求「脚本结束要自动拉起」）：
+  - 覆盖面从 `deploy` / `cli-patch` 扩到 `deploy` / `cli-patch` / `asar` / `asar-restore` / `restore`；
+  - **失败也拉起**（原先 `if ($failed -gt 0) { exit 1 }` 在拉起之前，失败就静默退出、不启动）；
+  - 只读动作（`-Verify` / `-Pull` / `-ListTargets`）与 `-DryRun` 不启动；`-NoRelaunch` 关闭；
+  - 两处 asar 调用统一传 `--no-launch`，拉起只由脚本末尾做——保证 `uc-seen --seed` / `verify` 先收口再开进程，也避免双实例；
+  - 修 `Start-WorkBuddyIfClosed` 的**多目标短路**：原来第一个目标已运行就 `return`，第二个未运行的目标永远不会被拉起，现改为 `continue` 并只在真的启动后返回。
+- **新增回归断言 `scripts/test-launch-coverage.ps1`**：静态断言（名单/顺序/`--no-launch`）+ 用 AST 取出真实的
+  `Start-WorkBuddyIfClosed` 跑四种场景（`Start-Process` 被同名函数拦截，不会真开窗口），20 条。
+  造两处回归（把 `continue` 改回 `return`、从名单删掉 `asar-restore`/`restore`）→ 7 条失败、exit 1；复原 → 全绿。
+- **文档补全**：`HOWTO-修改系统提示词.md`（改哪个文件 → 怎么应用 → 怎么验证）与
+  `TROUBLESHOOTING-not-effective.md`（「改了不生效」的排查链）随包发布；后者的本机路径已换成 `%USERPROFILE%` / `$HOME`。
+  清单从 9 组 69 文件增到 **10 组 75 文件**。
+- **`scripts/README.md` 补上漏掉的条目**：`refresh-cli-prewarm.py`、`_deps.js`、`test-launch-coverage.ps1`。
+
+### 证据
+
+- `1849.*.mjs` 247,364 → 250,670 字节；`--status` PATCHED；`--self-test` OK。
+- 真实 20,003 字符请求前缀清理后 17,672（删 2,331），五段 / current_time / user-context 全无，query 保留。
+- 真实会话 dbe0f043 第一条消息：第一轮保留 `user_info`；第二轮历史 user-context 删除、两条 query 保留。
+- `deploy.ps1 -CliPatch -DryRun`：两个 target OK，`App already running`，exit 0。
+- `npm run audit`：`RELEASE OK`，版本号三处一致（v1.3.4）。
+
+### 边界
+
+- 已打开的旧聊天不会热加载 chunk；开新聊天或完全退出后重开 WorkBuddy。脚本不杀进程。
+- trace / model-io 记录清理前快照；实际发给 provider 的是清理后的副本。
+- renderer 两处 `<current_time>` 源码仍在（云端助手 / 项目详情页），由 CLI 边界删除产出；要删源码需关应用后做 asar 补丁。
+
 ## v1.3.3 — 2026-11-21
 
 主题：**按用户要求再删五段过程性说明，提示词继续瘦身。**

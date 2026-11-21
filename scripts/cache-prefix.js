@@ -15,10 +15,14 @@
 //   node scripts/cache-prefix.js --strict       # 低于阈值(默认 95%)时退出码 1
 const fs = require("fs");
 const path = require("path");
+// 依赖与数据根的解析都在 _deps.js 里做，包内与工作区共用同一份脚本实现。
+const { loadNunjucks, dataFile } = require("./_deps");
 
-const nunjucks = require("nunjucks");
+const nunjucks = loadNunjucks();
 const ROOT = path.resolve(__dirname, "..");
-const CONTEXT_FILE = path.join(ROOT, "examples", "context.json");
+// 内容树（welcome-mode / fragments / plugins）在两种布局里都在脚本上一级；
+// examples/ 只在数据根里——工作区里是 release/examples。
+const CONTEXT_FILE = dataFile("examples/context.json");
 const base = JSON.parse(fs.readFileSync(CONTEXT_FILE, "utf8"));
 
 const args = process.argv.slice(2);

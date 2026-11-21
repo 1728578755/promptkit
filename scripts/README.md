@@ -15,6 +15,10 @@ scripts\deploy.cmd -DryRun
 scripts\deploy.cmd -Template welcome-mode\work.tpl
 scripts\deploy.cmd -Skill team-orchestration
 scripts\deploy.cmd -SkipAsarPatch      :: skip the app.asar patch that a deploy otherwise applies
+scripts\deploy.cmd -CliPatch           :: trim the agent runtime only; no need to close the app
+scripts\deploy.cmd -CliPatch -DryRun   :: preview the same, write nothing
+python scriptsefresh-cli-prewarm.py --apply :: stop only kind=prewarm + status=idle (never the app/current chat)
+scripts\deploy.cmd -SkipCliPatch       :: skip the runtime trim on a full deploy
 
 ::- restore (one click: put every installation back to its latest backup)
 scripts\restore.cmd
@@ -34,8 +38,15 @@ scripts\deploy.cmd -AsarRestore
 ```
 
 `deploy.ps1` resolves the target list once, then runs the chosen action for each installation:
-`apply.ps1` → product overrides (when present) → `app.asar` patch (when present) → `verify.ps1`,
+`apply.ps1` → product overrides (when present) → CLI runtime trim (`patch-cli-trim.py`, admin only) → `app.asar` patch (when present) → `verify.ps1`,
 with one summary table and a non-zero exit code if any target failed.
+
+`patch-cli-trim.py` targets `<install>\resources\app.asar.unpacked\cli\dist\lazy-lite-wb\1849.*.mjs`.
+It keeps the first turn's user-context, strips historical user-context/reminder-only messages on later turns,
+and removes the five removed prompt blocks plus `<current_time>` / `<additional_data>` from the system prompt
+before the provider call. It is idempotent, backs up the chunk, and rolls back if `node --check` fails.
+An already-open chat keeps the old chunk in memory: open a new chat or restart the app to load it.
+`deploy.cmd` / `deploy.cmd -CliPatch` will start the app if it is not running; they never kill it.
 
 Both `.cmd` files only pause when started with no arguments (double-click); a scripted call such as
 `deploy.cmd -Target workbuddy` returns instead of waiting for a keypress.
@@ -183,7 +194,7 @@ turn the gate on with `--mode-threshold N`.
   `-Elevate` for you (one UAC) so cache + install mirror + `resources\templates\` + `product.json` + `app.asar`
   are all written in one go; with arguments it forwards them unchanged. Both scripts end with `exit /b %RC%`,
   so a failed run can no longer look like a successful one.
-- `release-manifest.js` — the single list of what a releasable package must contain (9 groups, 69 files) plus the
+- `release-manifest.js` — the single list of what a releasable package must contain (10 groups, 75 files) plus the
   byte-sync lists used by the two scripts below. Add a new required input here, nowhere else.
 - `release-audit.js` — the release gate (`npm run audit`): completeness, byte equality with the maintainer source,
   one-click full write (`-Elevate` + `exit /b` + CRLF), and the version string in `package.json` / README / CHANGELOG.
@@ -191,13 +202,23 @@ turn the gate on with `--mode-threshold N`.
 - `sync-release.js` — mirrors the source tree into `release/` (prompts, runtime-layer inputs, deploy scripts).
   Refuses to run inside the package itself, so it can never create `release/release/`.
 - `deploy.ps1` — dispatcher: target discovery, one-shot elevation, then
-  deploy / `-Restore` / `-Verify` / `-Pull` / `-Asar` / `-AsarRestore` for every target.
+  deploy / `-Restore` / `-Verify` / `-Pull` / `-Asar` / `-AsarRestore` / `-CliPatch` for every target.
+  Every write action ends by starting the app if it is closed (`Start-WorkBuddyIfClosed`); read-only
+  actions (list / verify / pull) and `-DryRun` never start it. `-NoRelaunch` turns it off.
+  **Nothing in this script ever ends a process** — if the app is running, the asar patch refuses with exit 4.
+- `refresh-cli-prewarm.py` — retires only the idle `kind=prewarm` / `status=idle` CLI helpers so the next
+  chat spawns a fresh one; the app and the current chat are never touched. `--apply`, `--dry-run`, `--json`.
 - `target.ps1` / `targets.json` — installation discovery, data-dir pairing, multi-target resolution, optional path pins.
 - `apply.ps1` — copy engine: source tree → install mirror + plugin cache, backups, skill registration.
 - `pull.ps1` — snapshot the current prompts into `archive/pulls/<target>-<timestamp>/`.
 - `verify.ps1` — consistency check across project / install / cache (+ include resolution).
 - `restore.ps1` — restore a previous backup or the original baseline, per target.
-- `render.js` — Nunjucks render of all 15 template/mode combinations (release layout).
+- `_deps.js` — the only place that resolves "where is nunjucks" and "where is the data root". The package root
+  and the maintainer workspace have different layouts (deps and `examples/` live under `release/` there), so every
+  render/diagnostic script imports this instead of hardcoding `../release`. That is what lets the same file ship in
+  both trees byte-for-byte — no more "one side has `--root`, the other doesn't".
+- `render.js` — Nunjucks render of all 15 template/mode combinations into `dist/` (package root, or `release/dist`
+  in the workspace — same output either way).
 - `check.js` — structural assertions on the renders.
 - `render-check.js` — same render from the project layout, with edition profiles; `--root` renders any layout.
 - `cache-prefix.js` — prefix-cache retention per change scenario (LCP), optional `--strict` gate.
@@ -218,6 +239,10 @@ turn the gate on with `--mode-threshold N`.
 - `test-asar-launch.py` — asserts the launch-only path: a probe is really started through
   `explorer.exe`, a missing exe or `--no-launch` is skipped, and the source contains no
   process-killing call. 8 checks.
+- `test-launch-coverage.ps1` — asserts the "script ends → app is started" contract: the five write actions are in
+  `$launchActions`, read-only ones are not, `-DryRun` skips it, the launch happens **before** the failure exit,
+  both asar calls pass `--no-launch`, and the real `Start-WorkBuddyIfClosed` body (pulled from `deploy.ps1` with the
+  AST, `Start-Process` stubbed) starts the closed target even when an earlier target is already running. 20 checks.
 - `uc-seen.py` — manage the `user-context-durable` markers under `<config>\uc-seen\`:
   `--count`, `--seed` (mark every session that already has a transcript, so an old chat stops
   re-injecting), `--clear <sid>`, `--prune <days>`.  `--seed` takes effect immediately: the patch

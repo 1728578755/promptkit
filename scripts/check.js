@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
+// 数据根：包内 = 包根；工作区 = release/。两棵树跑的是同一份实现。
+const { dataRoot } = require("./_deps");
 
-const ROOT = path.resolve(__dirname, "..");
+const ROOT = dataRoot();
 const DIST = path.join(ROOT, "dist");
 
 const templates = ["work", "code", "design"];

@@ -51,9 +51,12 @@ const REQUIRED = {
     "scripts/targets.json",
     "scripts/apply-product-overrides.py",
     "scripts/patch-asar.py",
+    "scripts/patch-cli-trim.py",
+    "scripts/refresh-cli-prewarm.py",
     "scripts/_install.py",
   ],
   "渲染与诊断脚本（公开能力，不许悄悄丢）": [
+    "scripts/_deps.js",
     "scripts/render.js",
     "scripts/check.js",
     "scripts/render-check.js",
@@ -80,12 +83,19 @@ const REQUIRED = {
     "scripts/trace-tokens.py",
     "scripts/trace-turns.py",
     "scripts/test-asar-launch.py",
+    "scripts/test-launch-coverage.ps1",
     "scripts/test-user-context-once.js",
     "scripts/release-manifest.js",
     "scripts/release-audit.js",
     "scripts/sync-release.js",
   ],
   "包元数据": ["package.json", "CHANGELOG.md", "README.md", "examples/context.json"],
+  // 用户文档：源目录与包内同路径同步。HOWTO 是"改哪个文件、怎么应用、怎么验证"的唯一手册，
+  // TROUBLESHOOTING 是"改了不生效"的排查链——缺了它们，用户拿到包只能猜。
+  "用户文档": [
+    "HOWTO-修改系统提示词.md",
+    "TROUBLESHOOTING-not-effective.md",
+  ],
 };
 
 // 不进公开包的生成物（相对包根的前缀）。overrides/_dump 是 export-tool-desc.py 的抓取快照，
@@ -107,9 +117,21 @@ const SYNC_FILES = [
   "scripts/verify.ps1",
   "scripts/pull.ps1",
   "scripts/targets.json",
+  // 渲染入口与依赖解析：包内与工作区跑同一份实现，
+  // 布局差异（node_modules / examples 在包根还是 release/ 下）由 _deps.js 判断。
+  "scripts/_deps.js",
+  "scripts/render.js",
+  "scripts/check.js",
+  "scripts/render-check.js",
+  "scripts/cache-prefix.js",
+  "scripts/check-memory-blocks.js",
+  "scripts/render-runtime-templates.js",
+  "scripts/render-tool-overrides.js",
   // python 工具链
   "scripts/apply-product-overrides.py",
   "scripts/patch-asar.py",
+  "scripts/patch-cli-trim.py",
+  "scripts/refresh-cli-prewarm.py",
   "scripts/_install.py",
   "scripts/apply-skill-desc.py",
   "scripts/slim-mcp-descriptions.py",
@@ -129,6 +151,7 @@ const SYNC_FILES = [
   "scripts/uc-seen.py",
   "scripts/trace-turns.py",
   "scripts/test-asar-launch.py",
+  "scripts/test-launch-coverage.ps1",
   "scripts/verify-tool-overrides.py",
   // 发布工具与 JS 诊断
   "scripts/release-manifest.js",
@@ -137,16 +160,14 @@ const SYNC_FILES = [
   "scripts/cache-compare.js",
   "scripts/test-user-context-once.js",
   "scripts/test-removed-blocks.js",
+  // 用户文档：与源目录同路径同步
+  "HOWTO-修改系统提示词.md",
+  "TROUBLESHOOTING-not-effective.md",
 ];
 
-// 有意保留两份实现的脚本：包内用同目录 node_modules / examples，工作区里指向 release\
-// 只用"存在"来验，不做字节比较（各自的渲染用 npm run 真跑一遍）。
-const SCRIPT_DIFF_ALLOWED = [
-  "scripts/render-check.js",
-  "scripts/cache-prefix.js",
-  "scripts/check-memory-blocks.js",
-  "scripts/render-runtime-templates.js",
-  "scripts/render-tool-overrides.js",
-];
+// 历史：这里曾有一份 SCRIPT_DIFF_ALLOWED（渲染脚本允许两份实现，只验存在）。
+// 那种"允许"正是公开包与源目录行为漂移的入口：一边有 --root、一边没有，中文对齐一边有、一边丢。
+// 2026-11-21 起改成单一实现——布局差异全部收敛到 scripts/_deps.js，
+// 于是所有脚本都能进 SYNC_FILES 做逐字节比较，不需要任何豁免名单。
 
-module.exports = { REQUIRED, SYNC_DIRS, SYNC_FILES, SCRIPT_DIFF_ALLOWED, SYNC_IGNORE };
+module.exports = { REQUIRED, SYNC_DIRS, SYNC_FILES, SYNC_IGNORE };

@@ -19,7 +19,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { REQUIRED, SYNC_DIRS, SYNC_FILES, SCRIPT_DIFF_ALLOWED, SYNC_IGNORE } = require("./release-manifest");
+const { REQUIRED, SYNC_DIRS, SYNC_FILES, SYNC_IGNORE } = require("./release-manifest");
 
 const HERE = path.resolve(__dirname, "..");
 const NESTED = path.join(HERE, "release");
@@ -53,21 +53,28 @@ for (const [group, files] of Object.entries(REQUIRED)) {
   else ok(`完整性/${group}：${files.length} 个齐全`);
 }
 
-// ---------- 1b. 全覆盖：源 scripts/ 里每个文件都必须被清单点到 ----------
-// 光"清单里的文件都在包里"不够——新写的脚本忘了加清单，包就少一件能力。
-// 这条把「清单是源目录的超集」变成硬断言，正是"有的功能没加"的防线。
+// ---------- 1b. 全覆盖（双向）：清单与 scripts/ 必须互为子集 ----------
+// 只查"清单里的都在包里"不够——新写的脚本忘了加清单，包就少一件能力。
+// 反过来也要查：包里多出一个没登记的脚本，说明有人绕过清单往包里塞了东西，
+// 那它既不会被同步、也不会被审计，属于"悄悄多出来的第二份实现"。
+const listed = new Set([...Object.values(REQUIRED).flat(), ...SYNC_FILES]);
+const SCRIPT_EXT = /\.(js|py|ps1|cmd|json)$/;
+const isScript = (rel) =>
+  rel.startsWith("scripts/") && SCRIPT_EXT.test(rel) && !rel.includes("__pycache__") && !rel.endsWith(".pyc");
+const relList = (base) =>
+  walk(path.join(base, "scripts")).map((p) => path.relative(base, p).split(path.sep).join("/"));
+
 if (SRC) {
-  const listed = new Set([
-    ...Object.values(REQUIRED).flat(),
-    ...SYNC_FILES,
-    ...SCRIPT_DIFF_ALLOWED,
-  ]);
-  const srcScripts = walk(path.join(SRC, "scripts"))
-    .map((p) => path.relative(SRC, p).split(path.sep).join("/"))
-    .filter((rel) => !rel.includes("__pycache__") && !rel.endsWith(".pyc"));
+  const srcScripts = relList(SRC).filter(isScript);
   const orphans = srcScripts.filter((rel) => !listed.has(rel));
   if (orphans.length) bad(`全覆盖：源 scripts/ 里有 ${orphans.length} 个文件没进清单 → ${orphans.join(", ")}`);
   else ok(`全覆盖：源 scripts/ 的 ${srcScripts.length} 个文件都进了清单`);
+}
+{
+  const pkgScripts = relList(PKG).filter(isScript);
+  const unlisted = pkgScripts.filter((rel) => !listed.has(rel));
+  if (unlisted.length) bad(`全覆盖（反向）：包内 scripts/ 里有 ${unlisted.length} 个文件没进清单 → ${unlisted.join(", ")}`);
+  else ok(`全覆盖（反向）：包内 scripts/ 的 ${pkgScripts.length} 个文件都在清单里`);
 }
 
 // ---------- 2. 一致性 ----------
@@ -103,10 +110,7 @@ if (!SRC) {
     if (!fs.existsSync(b)) { bad(`一致性/${f}：包里缺这个文件`); mismatch++; continue; }
     if (sha(a) !== sha(b)) { bad(`一致性/${f}：与源内容不同`); mismatch++; }
   }
-  if (!mismatch) ok(`一致性/部署脚本：${SYNC_FILES.length} 个逐字节相同`);
-  for (const f of SCRIPT_DIFF_ALLOWED) {
-    if (!fs.existsSync(at(PKG, f))) bad(`一致性/${f}：包里缺这个文件`);
-  }
+  if (!mismatch) ok(`一致性/部署与诊断脚本：${SYNC_FILES.length} 个逐字节相同`);
 }
 
 // ---------- 3. 可一键 ----------

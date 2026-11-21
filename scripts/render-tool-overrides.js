@@ -10,9 +10,12 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const nunjucks = require('nunjucks');
+// 依赖与数据根的解析都在 _deps.js 里做，包内与工作区共用同一份脚本实现。
+const { loadNunjucks, dataFile } = require('./_deps');
 
-const FILE = path.join(__dirname, '..', 'overrides', 'tools', 'session-tools.compact.json');
+const nunjucks = loadNunjucks();
+// overrides/ 在两种布局里都在内容树根下（包根 / 工作区里的 release/）
+const FILE = dataFile('overrides/tools/session-tools.compact.json');
 const data = JSON.parse(fs.readFileSync(FILE, 'utf8'));
 
 const ctx = {

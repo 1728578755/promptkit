@@ -12,17 +12,8 @@
 // 退出码 1 表示有断言不成立。
 const fs = require("fs");
 const path = require("path");
-
-function loadNunjucks() {
-  const candidates = [
-    "nunjucks",
-    path.join(__dirname, "..", "node_modules", "nunjucks"),
-  ];
-  for (const c of candidates) {
-    try { return require(c); } catch { }
-  }
-  throw new Error("nunjucks not found. Run: npm install");
-}
+// 依赖与数据根的解析都在 _deps.js 里做，包内与工作区共用同一份脚本实现。
+const { loadNunjucks } = require("./_deps");
 
 const nunjucks = loadNunjucks();
 const ROOT = path.resolve(__dirname, "..");

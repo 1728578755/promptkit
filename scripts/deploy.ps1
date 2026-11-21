@@ -6,6 +6,7 @@ param(
     [switch]$Pull,
     [switch]$Asar,
     [switch]$AsarRestore,
+    [switch]$CliPatch,
     [switch]$ListTargets,
     [switch]$List,
 
@@ -35,6 +36,7 @@ param(
     [string]$Overlay = "",
     [switch]$SkipProductOverrides,
     [switch]$SkipAsarPatch,
+    [switch]$SkipCliPatch,
 
     # --- restore options (forwarded to restore.ps1) ---
     [string]$BackupPath = "",
@@ -87,6 +89,7 @@ function Set-TargetEnv($profile) {
 $action = "deploy"
 if ($ListTargets) { $action = "list" }
 elseif ($AsarRestore) { $action = "asar-restore" }
+elseif ($CliPatch) { $action = "cli-patch" }
 elseif ($Asar) { $action = "asar" }
 elseif ($Restore) { $action = "restore" }
 elseif ($Verify) { $action = "verify" }
@@ -94,7 +97,7 @@ elseif ($Pull) { $action = "pull" }
 
 
 # --- elevation: ask once, then every target is written from the same elevated run ---
-$needsAdmin = ((($action -eq "asar") -or ($action -eq "asar-restore")) -and (-not $DryRun))
+$needsAdmin = ((($action -eq "asar") -or ($action -eq "asar-restore") -or ($action -eq "cli-patch")) -and (-not $DryRun))
 if (($Elevate -or $needsAdmin) -and -not $isAdmin) {
     $fwd = @()
     foreach ($k in @($PSBoundParameters.Keys)) {
@@ -221,8 +224,9 @@ function Invoke-AsarPatch($profile, $result) {
     $env:PYTHONIOENCODING = "utf-8"
     $asarOut = @()
     $asarArgs = @("-X", "utf8", $script, "--apply", "--asar", $asar)
-    # 打完自动启动应用（只启动，从不结束进程）；-NoRelaunch 关掉
-    if ($NoRelaunch) { $asarArgs += "--no-launch" }
+    # 拉起统一由本脚本末尾做：patch-asar.py 自己也拉起的话，它启动的进程会赶在
+    # uc-seen seed / verify 之前起来，等于让新进程读一个还没收口的状态。
+    $asarArgs += "--no-launch"
     try {
         $asarOut = @(& $py @asarArgs 2>&1 | ForEach-Object { [string]$_ })
         $asarCode = $LASTEXITCODE
@@ -268,10 +272,7 @@ function Invoke-AsarPatch($profile, $result) {
             $result.Status = "FAIL"
         } else {
             $nPatched = @($st | Where-Object { $_ -match '^patch:\s+\S+\s+patched\b' }).Count
-            $launchNote = if ($asarText -match '(?m)^已启动：') { "; app started" }
-                          elseif ($NoRelaunch) { "; app not started (-NoRelaunch)" }
-                          else { "" }
-            Add-Note $result ("app.asar verified: {0} patches + integrity + exe manifest{1}" -f $nPatched, $launchNote)
+            Add-Note $result ("app.asar verified: {0} patches + integrity + exe manifest" -f $nPatched)
         }
     }
 }
@@ -329,6 +330,14 @@ function Invoke-DeployTarget($profile) {
     if ($code -ne 0) { throw "apply.ps1 failed for $($profile.Name) (exit $code)" }
 
     Invoke-ProductOverrides $profile $result
+    if (-not $SkipCliPatch) {
+        if (-not $isAdmin) { Add-Note $result "cli trim needs -Elevate (Program Files)" }
+        else {
+            $cli = Invoke-CliPatchTarget $profile
+            if ($cli.Note) { Add-Note $result ("cli: " + $cli.Note) }
+            if ($cli.Status -eq "FAIL") { $result.Status = "FAIL" }
+        }
+    }
     Invoke-AsarPatch $profile $result
     Invoke-UcSeenSeed $profile $result
 
@@ -447,7 +456,8 @@ function Invoke-AsarTarget($profile, [string]$mode) {
 
     $args = @($script, "--asar", $asar)
     if ($DryRun) { $args += "--dry-run" } else { $args += "--$mode" }
-    if ($NoRelaunch) { $args += "--no-launch" }
+    # 同 Invoke-AsarPatch：拉起统一由本脚本末尾做，-NoRelaunch 在那里生效。
+    $args += "--no-launch"
     Invoke-Python $py $args
     $code = $LASTEXITCODE
     if ($code -eq 2) {
@@ -462,6 +472,77 @@ function Invoke-AsarTarget($profile, [string]$mode) {
     }
     $result.Status = "OK"
     return $result
+}
+
+
+function Invoke-CliPatchTarget($profile) {
+    Set-TargetEnv $profile
+    $result = New-Result $profile.Name $profile.Label "cli-patch"
+    if (-not $profile.Installed) { Add-Note $result "not installed"; return $result }
+    $script = Join-Path $ScriptRoot "patch-cli-trim.py"
+    if (-not (Test-Path -LiteralPath $script)) {
+        Add-Note $result "patch-cli-trim.py not present"
+        $result.Status = "FAIL"
+        return $result
+    }
+    $py = Get-PythonExe $profile.ConfigDir
+    if (-not $py) {
+        Add-Note $result "python not found for $($profile.Name)"
+        $result.Status = "FAIL"
+        return $result
+    }
+    $prevIo = $env:PYTHONIOENCODING
+    $env:PYTHONIOENCODING = "utf-8"
+    $out = @()
+    try {
+        $cliArgs = @("-X", "utf8", $script, "--apply")
+        if ($DryRun) { $cliArgs += "--dry-run" }
+        $out = @(& $py @cliArgs 2>&1 | ForEach-Object { [string]$_ })
+        $code = $LASTEXITCODE
+    } finally {
+        if ($null -eq $prevIo) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prevIo }
+    }
+    foreach ($line in $out) { Write-Host $line }
+    if ($code -ne 0) {
+        Add-Note $result "cli patch exit $code"
+        $result.Status = "FAIL"
+        return $result
+    }
+    $st = @(& $py -X utf8 $script --status 2>&1 | ForEach-Object { [string]$_ })
+    if (@($st | Where-Object { $_ -match '^status:\s+PATCHED' }).Count -eq 0) {
+        Add-Note $result "cli patch did not verify"
+        $result.Status = "FAIL"
+        return $result
+    }
+    $result.Status = "OK"
+    Add-Note $result "cli runtime trimmed; restart the app or open a new chat to load it"
+    return $result
+}
+
+function Start-WorkBuddyIfClosed($profiles) {
+    # 「脚本结束要自动拉起」的唯一落点：所有写盘动作结束时都走这里。
+    # 只启动，从不结束进程；-NoRelaunch 关掉。
+    if ($NoRelaunch) { Write-Host "App not started (-NoRelaunch)." -ForegroundColor DarkGray; return $false }
+    $running = @()
+    foreach ($p in $profiles) {
+        if (-not $p.Installed -or -not $p.ExeName) { continue }
+        $exe = $p.ExeName
+        if (-not [IO.Path]::IsPathRooted($exe)) { $exe = Join-Path $p.InstallPath $exe }
+        if (-not (Test-Path -LiteralPath $exe)) { continue }
+        $name = [IO.Path]::GetFileNameWithoutExtension($exe)
+        if (@(Get-Process -Name $name -ErrorAction SilentlyContinue).Count -gt 0) {
+            # continue 而不是 return：一套安装在跑，不代表另一套也不用启动
+            $running += $exe
+            continue
+        }
+        Start-Process -FilePath "explorer.exe" -ArgumentList ('"{0}"' -f $exe)
+        Write-Host ("App started: {0}" -f $exe) -ForegroundColor Green
+        return $true
+    }
+    if ($running.Count -gt 0) {
+        Write-Host ("App already running: {0}" -f ($running -join ", ")) -ForegroundColor DarkGray
+    }
+    return $false
 }
 
 # --- list ---
@@ -502,6 +583,7 @@ foreach ($profile in $profiles) {
             "pull" { $r = Invoke-PullTarget $profile }
             "asar" { $r = Invoke-AsarTarget $profile "apply" }
             "asar-restore" { $r = Invoke-AsarTarget $profile "restore" }
+            "cli-patch" { $r = Invoke-CliPatchTarget $profile }
         }
     } catch {
         $r.Status = "FAIL"
@@ -522,6 +604,15 @@ foreach ($r in $results) {
 }
 
 $failed = @($results | Where-Object { $_.Status -eq "FAIL" }).Count
+
+# 结束即拉起：写盘类动作（deploy / cli-patch / asar / asar-restore / restore）跑完就启动应用；
+# 失败也启动——脚本结束时就该能看到结果，而不是再手动点一次图标。
+# 只读动作（list / verify / pull）与 -DryRun 不启动。
+$launchActions = @("deploy", "cli-patch", "asar", "asar-restore", "restore")
+if (($launchActions -contains $action) -and -not $DryRun) {
+    Start-WorkBuddyIfClosed $profiles | Out-Null
+}
+
 if ($failed -gt 0) {
     Write-Host ("{0} target(s) failed." -f $failed) -ForegroundColor Red
     exit 1
