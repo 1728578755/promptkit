@@ -186,7 +186,7 @@ function Get-InstallCandidates {
         foreach ($b in $bases) {
             if (-not (Test-Path -LiteralPath $b)) { continue }
             Get-ChildItem -LiteralPath $b -Directory -Recurse -Depth 1 -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like "*WorkBuddy*" } |
+                Where-Object { $_.Name -like "*WorkBuddy*" -or (Test-Path -Path (Join-Path $_.FullName "WorkBuddy*.exe")) } |
                 ForEach-Object { & $add $_.FullName }
         }
     }

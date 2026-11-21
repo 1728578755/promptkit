@@ -133,7 +133,7 @@ function Find-Installs {
         foreach ($b in $bases) {
             if (-not (Test-Path -LiteralPath $b)) { continue }
             Get-ChildItem -LiteralPath $b -Directory -Recurse -Depth 1 -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match "WorkBuddy" } | ForEach-Object { $roots.Add($_.FullName) }
+                Where-Object { $_.Name -match "WorkBuddy" -or (Test-Path -Path (Join-Path $_.FullName "WorkBuddy*.exe")) } | ForEach-Object { $roots.Add($_.FullName) }
         }
     }
     $out = New-Object System.Collections.Generic.List[string]
