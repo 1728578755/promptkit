@@ -88,14 +88,68 @@ def searched():
         return []
 
 
+def _is_client_data_dir(path):
+    """像不像客户端数据目录：有 plugins / sessions / traces / settings.json 之一。
+
+    只看名字 `.workbuddy*` 会把辅助目录（例如只放 connector-keys 的
+    `.workbuddy-key-fallback`）也当成数据目录，然后误报"缓存冷启动缺失"。
+    """
+    if not os.path.isdir(path):
+        return False
+    for rel in (("plugins",), ("sessions",), ("traces",), ("settings.json",)):
+        if os.path.exists(os.path.join(path, *rel)):
+            return True
+    return False
+
+
 def config_dirs():
+    """所有数据目录：.workbuddy、.workbuddy-ai 以及任何像数据目录的 .workbuddy* 变体。"""
     home = os.path.expanduser("~")
     out = []
+    env = os.environ.get("WORKBUDDY_CONFIG_DIR")
+    if env and _is_client_data_dir(env):
+        out.append(env)
     for name in (".workbuddy", ".workbuddy-ai"):
         p = os.path.join(home, name)
-        if os.path.isdir(p):
+        if _is_client_data_dir(p):
             out.append(p)
+    try:
+        for entry in sorted(os.listdir(home)):
+            if not entry.startswith(".workbuddy"):
+                continue
+            p = os.path.join(home, entry)
+            if p in out:
+                continue
+            if _is_client_data_dir(p):
+                out.append(p)
+    except OSError:
+        pass
     return out
+
+
+def install_from_data_dir(cfg):
+    """<数据目录>\\.skill-list-cache.json 的 scopeKey 反查安装目录（便携/未注册安装也能配对）。"""
+    cache_file = os.path.join(cfg, ".skill-list-cache.json")
+    try:
+        with open(cache_file, encoding="utf-8", errors="replace") as fh:
+            data = json.load(fh)
+    except Exception:
+        return ""
+    keys = data.get("scopeKey") if isinstance(data, dict) else None
+    if isinstance(keys, str):
+        # 实际格式是 JSON 数组的字符串（不是单个路径），先尝试解析，失败再当一条路径。
+        try:
+            parsed = json.loads(keys)
+            keys = parsed if isinstance(parsed, list) else [keys]
+        except Exception:
+            keys = [keys]
+    for s in keys or []:
+        if not isinstance(s, str):
+            continue
+        m = re.match(r"^(.*?)\\resources\\app\.asar\.unpacked", s)
+        if m:
+            return m.group(1)
+    return ""
 
 
 # ------------------------------------------------------------------ layers
@@ -111,6 +165,12 @@ def pair_config(install_root, cfgs):
     want = ".workbuddy-ai" if "workbuddy.ai" in endpoint else ".workbuddy"
     for c in cfgs:
         if os.path.basename(c).lower() == want:
+            return c
+    # 名字对不上时按 scopeKey 反查：便携/改名安装的数据目录不叫 .workbuddy 也能配对
+    target = os.path.normcase(os.path.abspath(install_root).rstrip("\\"))
+    for c in cfgs:
+        paired = install_from_data_dir(c)
+        if paired and os.path.normcase(os.path.abspath(paired).rstrip("\\")) == target:
             return c
     return ""
 
@@ -138,6 +198,7 @@ def layer_templates(cfg_dirs):
         for ver, item in sorted(versions.items()):
             rows.append({
                 "where": "%s  %s" % (os.path.basename(cfg), ver),
+                "cfg": cfg,
                 "state": PASS if item["hits"] == 0 else FAIL,
                 "detail": "files=%d bytes=%d removed_hits=%d %s"
                           % (item["files"], item["bytes"], item["hits"],
@@ -145,6 +206,7 @@ def layer_templates(cfg_dirs):
             })
         if not versions:
             rows.append({"where": "%s  prompt.tpl" % os.path.basename(cfg),
+                         "cfg": cfg,
                          "state": MISSING, "detail": "没有缓存模板（还没部署过）"})
     return rows
 
@@ -399,7 +461,7 @@ def layer_helper(chunks):
         i, j = text.find(begin), text.find(end)
         if i < 0 or j < 0:
             lite = "__wbTrimLite" in text
-            rows.append({"where": os.path.basename(path),
+            rows.append({"where": os.path.basename(path), "path": path,
                          "state": WARN if lite else MISSING,
                          "detail": ("只有轻量出口清理（__wbTrimLite），没有完整 helper"
                                     if lite else "chunk 里没有清理 helper（未打补丁？）")})
@@ -414,7 +476,7 @@ def layer_helper(chunks):
         except OSError:
             pass
         out = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
-        rows.append({"where": os.path.basename(path),
+        rows.append({"where": os.path.basename(path), "path": path,
                      "state": PASS if p.returncode == 0 else FAIL,
                      "detail": (out[-1] if out else "(no output)")[:160]})
     return rows
@@ -492,6 +554,49 @@ def layer_trace(trace, chunk_mtime):
     return rows, ("older" if older else "clean"), []
 
 
+def decide(roots, active, failing, global_problems, warnings, unproven):
+    """把逐层结果折算成 (verdict, reason, hard, soft)。
+
+    规则（B：未在使用的安装不得一票否决）：
+      * active 只来自"正在运行的进程"——这是唯一能证明"现在用的是哪套"的证据。
+        最新 trace 可能来自旧会话，不能作为"当前使用"的判据。
+      * 有 active：只有 active 里的安装失败才算 hard；其余一律 soft（WARN）。
+      * 没有 active：只有"全部安装都失败"才是 hard（无法判断在用哪套，保守判失败）；
+        部分失败 -> soft（PARTIAL），不影响退出码。
+    """
+    failing = {r: p for r, p in failing.items() if p}
+    if active:
+        hard = {r: p for r, p in failing.items() if r in active}
+        soft = {r: p for r, p in failing.items() if r not in active}
+    elif failing and len(failing) >= len(roots):
+        hard, soft = dict(failing), {}
+    else:
+        hard, soft = {}, dict(failing)
+
+    if global_problems or hard:
+        verdict = "NOT EFFECTIVE"
+        reason = "; ".join(global_problems + [x for p in hard.values() for x in p])
+        if soft:
+            reason += ("；另有 %d 套未在使用的安装没打全（WARN，不计入失败）：%s"
+                       % (len(soft), ", ".join(sorted(soft))))
+    elif soft and not active:
+        verdict = "PARTIAL"
+        reason = ("有 %d 套安装没打全（本机没有运行中的进程，无法判断你在用哪套）：%s"
+                  % (len(soft), ", ".join(sorted(soft))))
+    elif soft:
+        verdict = "EFFECTIVE"
+        reason = ("当前使用的安装已生效；另有 %d 套未打全、不影响使用（WARN）：%s"
+                  % (len(soft), ", ".join(sorted(soft))))
+    elif unproven:
+        verdict, reason = "UNPROVEN", "; ".join(unproven)
+    else:
+        verdict = "EFFECTIVE"
+        reason = "所有层已生效，最新请求也已干净"
+        if warnings:
+            reason += "；另有提示：" + "; ".join(warnings)
+    return verdict, reason, hard, soft
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--install", action="append", default=[])
@@ -519,6 +624,10 @@ def main():
         emit(r'            若安装在别处：scripts\doctor.cmd --install "<安装根目录>"')
 
     global_problems, per_install, unproven, warnings = [], {}, [], []
+    # 与"哪一套安装"绑定的问题：先按配置目录/安装根归类，结论区再按"当前使用"分流。
+    # 否则一套没在用的安装（旧版本、便携副本）会把全局结论打成 NOT EFFECTIVE。
+    cfg_problems = {}
+    template_problems = {}
 
     emit("")
     emit("[1] 提示词模板（缓存 prompt.tpl，八个块必须 0）")
@@ -526,15 +635,24 @@ def main():
     for r in t_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
         if r["state"] in (FAIL, MISSING):
-            global_problems.append("templates %s: %s" % (r["where"].strip(), r["detail"]))
+            # 先按配置目录记账：等安装列表算出来后再归属到具体安装（见 [3.5] 前的汇总）
+            template_problems.setdefault(r.get("cfg") or "", []).append(
+                "templates %s: %s" % (r["where"].strip(), r["detail"]))
 
     chunk_paths = []
+    chunk_owner = {}
     root_mtimes = {}
+    cfg_owner = {}
     for root in roots:
+        cfg = pair_config(root, cfgs)
+        if cfg:
+            cfg_owner[cfg] = root
         emit("")
         emit("[2] CLI 运行时  %s" % root)
         c_rows, chunks = layer_cli(root)
         chunk_paths.extend(chunks)
+        for c in chunks:
+            chunk_owner[c] = root
         if chunks:
             root_mtimes[root] = max(os.path.getmtime(c) for c in chunks)
         for r in c_rows:
@@ -589,12 +707,18 @@ def main():
     for r in h_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
         if r["state"] in (FAIL, MISSING):
-            global_problems.append("helper %s: %s" % (r["where"].strip(), r["detail"]))
+            owner = chunk_owner.get(r.get("path") or "", "")
+            if owner:
+                cfg_problems.setdefault(owner, []).append("helper %s: %s" % (r["where"].strip(), r["detail"]))
+            else:
+                global_problems.append("helper %s: %s" % (r["where"].strip(), r["detail"]))
         elif r["state"] == WARN:
             warnings.append("helper %s: %s" % (r["where"].strip(), r["detail"]))
 
     emit("")
     emit("[8] 判读规则（先看这里，再决定下一步）")
+    emit("    !! 验证必须新开空白会话（见结论区的「验证」一行）：旧会话历史里本来就存着旧块，")
+    emit("       旧聊天会把它原样重发，看起来像“没生效”，实际是历史回放。")
     emit("    [1] removed_hits>0    → 模板层没部署到那个版本，重跑 deploy.cmd")
     emit("    [2] MISMATCH / FAIL   → chunk 没打上（文件名变了 / 没管理员 / 被安全软件拦）")
     emit("    [3] 某条 raw          → asar 没打上（应用在运行），关掉应用后重跑 deploy.cmd")
@@ -608,56 +732,51 @@ def main():
     emit("      · 仍出现则说明块是云端在服务端拼 prompt 时加的，本地删不掉；")
     emit("        本地能做的是不再上报时间（current-time / current-time-cloud 两个 asar 补丁）。")
 
-    # 哪一套是"当前在用"：有进程在跑 -> 它所在的安装；没有进程 -> 最新 trace 所属配置对应的安装
+    # 哪一套是"当前在用"：唯一可信的证据是"有进程正在从它运行"。
+    # 最新 trace 只能说明"最近写过什么"，旧会话/另一套安装的 trace 都会误导，故不用它判 active。
     active = set()
     for pr in procs:
         path = (pr.get("path") or "").lower()
         for r in roots:
             if path.startswith(r.lower().rstrip("\\") + "\\"):
                 active.add(r)
-    if not active and trace and trace.get("path"):
-        tcfg = os.path.basename(os.path.dirname(os.path.dirname(trace["path"]))).lower()
-        for r in roots:
-            if os.path.basename(pair_config(r, cfgs)).lower() == tcfg:
-                active.add(r)
+    if not active and per_install and len(per_install) == 1 and len(roots) == 1:
+        # 只有一套安装时不存在"拿哪套当当前"的歧义
+        active.add(roots[0])
+
+    # 模板层的问题按"配置目录 -> 安装"归属；认不出归属的才是全局问题。
+    for cfg, items in template_problems.items():
+        if not items:
+            continue
+        owner = cfg_owner.get(cfg, "")
+        if owner:
+            cfg_problems.setdefault(owner, []).extend(items)
+        else:
+            global_problems.extend(items)
 
     failing = {r: p for r, p in per_install.items() if p}
-    if active:
-        hard = {r: p for r, p in failing.items() if r in active}
-    else:
-        hard = failing if (failing and len(failing) == len(roots)) else {}
-    soft = {r: p for r, p in failing.items() if r not in hard}
+    # 把模板层的问题并进每套安装的失败清单
+    for r, items in cfg_problems.items():
+        failing.setdefault(r, []).extend(items)
+
+    verdict, reason, hard, soft = decide(roots, active, failing, global_problems, warnings, unproven)
+    report["verdict"], report["reason"] = verdict, reason
 
     emit("")
     emit("[3.5] 每套安装的结论")
     for r in roots:
+        state = FAIL if r in hard else (WARN if r in failing else PASS)
         tag = "当前使用" if r in active else ("未在使用" if active else "")
-        emit("    %-46s %-6s %s" % (r, FAIL if r in failing else PASS, tag))
-
-    emit("")
-    if global_problems or hard:
-        verdict = "NOT EFFECTIVE"
-        reason = "; ".join(global_problems + [x for p in hard.values() for x in p])
-    elif soft and not active:
-        verdict = "PARTIAL"
-        reason = ("有 %d 套安装没打全（本机没有运行中的进程，无法判断你在用哪套）：%s"
-                  % (len(soft), ", ".join(sorted(soft))))
-    elif soft:
-        verdict = "EFFECTIVE"
-        reason = ("当前使用的安装已生效；另有 %d 套未打全、不影响使用：%s"
-                  % (len(soft), ", ".join(sorted(soft))))
-    elif unproven:
-        verdict, reason = "UNPROVEN", "; ".join(unproven)
-    else:
-        verdict = "EFFECTIVE"
-        reason = "所有层已生效，最新请求也已干净"
-        if warnings:
-            reason += "；另有提示：" + "; ".join(warnings)
-    report["verdict"], report["reason"] = verdict, reason
+        emit("    %-46s %-6s %s%s" % (r, state, tag,
+                                      "" if state != WARN else "  （未在使用的安装没打全：不影响当前结论）"))
 
     # 结论放最上面：窗口第一屏就能看到，不用滚到底。
+    # 验证口径也放在结论区：旧会话历史里本来就存着旧块，用它验证永远"看起来没生效"。
     head, rest = lines[:3], lines[3:]
-    lines = head + ["", "结论      : %s" % verdict, "原因      : %s" % reason] + rest
+    lines = head + ["", "结论      : %s" % verdict, "原因      : %s" % reason,
+                    "验证      : 必须新开空白会话 —— 旧会话历史里本来就存着旧块，"]
+    lines[-1] = lines[-1] + "\n             旧聊天会把它原样重发，看起来像“没生效”，实际是历史回放。"
+    lines = lines + rest
     text = "\n".join(lines)
     print(text)
     if args.write_report:

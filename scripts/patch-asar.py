@@ -680,6 +680,47 @@ def file_locked(path):
         return True
 
 
+PROC_SCRIPT = (r"Get-CimInstance Win32_Process | "
+               r"Where-Object { $_.Name -match 'WorkBuddy|codebuddy' } | "
+               r"ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId,$_.Name,$_.ExecutablePath }")
+
+
+def running_workbuddy():
+    """运行中的 WorkBuddy* / codebuddy 进程：[(pid, name, exe_path), …]。
+
+    WinError 32 的直接原因就是这些进程把 app.asar / exe 镜像映射住了。
+    输出里必须带进程名与 PID，用户才知道该关哪个（脚本从不结束任何进程）。
+    """
+    if os.name != "nt":
+        return []
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-Command", PROC_SCRIPT],
+                           capture_output=True, text=True, encoding="mbcs",
+                           errors="replace", timeout=60)
+        out = p.stdout or ""
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.strip().split("|", 2)
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        rows.append((int(parts[0]), parts[1], parts[2] if len(parts) > 2 else ""))
+    return rows
+
+
+def report_running(procs, action):
+    """打印占用者清单；返回 True 表示有进程在跑。"""
+    if not procs:
+        return False
+    print("!! 检测到 %d 个正在运行的 WorkBuddy / codebuddy 进程（%s 需要它们完全退出）：" % (len(procs), action))
+    for pid, name, exe in procs:
+        print("   pid=%-7d %-18s %s" % (pid, name, exe or "(路径不可读)"))
+    print("   这些进程把 app.asar / exe 镜像映射住（WinError 32）。脚本不会结束它们；")
+    print("   请完全退出 WorkBuddy（含托盘图标）后重跑。")
+    return True
+
+
 def exe_manifest_hashes(exe_path):
     with open(exe_path, "rb") as f:
         blob = f.read()
@@ -868,6 +909,9 @@ def main():
     if args.status or (not args.apply and not args.restore and not args.dry_run):
         print("asar:   %s" % asar)
         print("size:   %d" % size)
+        procs = running_workbuddy()
+        if procs:
+            print("running: %s" % ", ".join("%s(pid=%d)" % (n, p) for p, n, _e in procs))
         for name, s in patch_states(data):
             print("patch:  %-17s %s" % (name, s))
         print("sha256: %s" % sha256_bytes(data))
@@ -963,6 +1007,7 @@ def main():
 
         if exe_edits and exe_path and (file_locked(asar) or exe_write_blocked(exe_path)):
             print("!! WorkBuddy 正在运行，无法写 WorkBuddy.exe / app.asar；还原未执行（未改任何字节）。")
+            report_running(running_workbuddy(), "asar 还原")
             print("   请完全退出 WorkBuddy（含托盘）后重跑 scripts\\restore.cmd。")
             return 4
 
@@ -1031,6 +1076,7 @@ def main():
         exe_sha_before = sha256_file(exe)
         if exe_write_blocked(exe) or file_locked(asar):
             print("!! WorkBuddy.exe 写不进去（WorkBuddy 正在运行，exe / asar 被镜像锁定）。")
+            report_running(running_workbuddy(), "exe 清单同步")
             print("   请完全退出 WorkBuddy（含托盘）后重跑 scripts\\deploy.cmd -Asar。")
             return 4
         try:
@@ -1128,8 +1174,14 @@ def main():
     if args.dry_run:
         if file_locked(asar) or (exe and exe_write_blocked(exe)):
             print("[dry-run] 注意：asar / exe 当前被占用（WorkBuddy 可能正在运行），实跑会以退出码 4 拒绝写入")
+            report_running(running_workbuddy(), "asar 写入")
         print("[dry-run] 不写文件")
         return 0
+
+    # 先报出占用者（进程名 + PID），再判断能不能写：WinError 32 的原因必须可见。
+    procs = running_workbuddy()
+    if procs:
+        report_running(procs, "asar 写入")
 
     if file_locked(asar) or (exe and exe_edits and exe_write_blocked(exe)):
         print("!! WorkBuddy.exe / app.asar 写不进去（WorkBuddy 正在运行，文件被镜像锁定）。")

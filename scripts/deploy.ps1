@@ -118,22 +118,72 @@ if (($Elevate -or $needsAdmin) -and -not $isAdmin) {
 }
 
 # --- python: target's own bundled runtime first, never a hard-coded path ---
-function Get-PythonExe([string]$configDir) {
-    if ($env:WORKBUDDY_PYTHON) { return $env:WORKBUDDY_PYTHON }
-    foreach ($cand in @("python", "python3", "py")) {
+# 顺序：WORKBUDDY_PYTHON -> PATH 里的 python -> py launcher -> WorkBuddy 自带 binaries\python\versions。
+# py launcher 用 `py -3 -c "import sys;print(sys.executable)"` 解出真实解释器，不猜安装位置。
+function Get-PyLauncherExe {
+    foreach ($cand in @("py", "py.exe")) {
         $c = Get-Command $cand -ErrorAction SilentlyContinue
-        if ($c -and $c.Source -notmatch 'WindowsApps') { return $c.Source }
+        if (-not $c) { continue }
+        try {
+            $out = @(& $c.Source -3 -c "import sys;print(sys.executable)" 2>&1 | ForEach-Object { [string]$_ })
+            foreach ($line in $out) {
+                $p = $line.Trim()
+                if ($p -and (Test-Path -LiteralPath $p) -and ($p -notmatch 'WindowsApps')) { return $p }
+            }
+        } catch { }
     }
+    return $null
+}
+
+function Get-BundledPythonExe([string]$configDir, [string]$installPath) {
     $roots = @()
-    if ($configDir) { $roots += (Join-Path $configDir "binaries\python\versions") }
-    if ($env:USERPROFILE) { $roots += (Join-Path $env:USERPROFILE "miniforge3") }
+    foreach ($dir in @($configDir)) {
+        if ($dir) { $roots += (Join-Path $dir "binaries\python\versions") }
+    }
+    if ($installPath) {
+        $roots += (Join-Path $installPath "resources\binaries\python\versions")
+        $roots += (Join-Path $installPath "resources\app.asar.unpacked\binaries\python\versions")
+    }
+    if ($env:USERPROFILE) {
+        $roots += (Join-Path $env:USERPROFILE "miniforge3")
+    }
     foreach ($root in $roots) {
         if (-not (Test-Path -LiteralPath $root)) { continue }
+        # 先看 "current" 指针，再按版本目录倒序找 python.exe
+        $current = Join-Path $root "current"
+        if (Test-Path -LiteralPath $current) {
+            $rel = ""
+            try { $rel = (Get-Content -LiteralPath $current -TotalCount 1).Trim() } catch { }
+            if ($rel) {
+                $p = Join-Path (Join-Path $root $rel) "python.exe"
+                if (Test-Path -LiteralPath $p) { return $p }
+            }
+        }
         $hit = Get-ChildItem -LiteralPath $root -Filter "python.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch 'WindowsApps' } | Select-Object -First 1
+            Where-Object { $_.FullName -notmatch 'WindowsApps' } | Sort-Object FullName -Descending | Select-Object -First 1
         if ($hit) { return $hit.FullName }
     }
     return $null
+}
+
+function Get-PythonExe([string]$configDir, [string]$installPath = "") {
+    if ($env:WORKBUDDY_PYTHON -and (Test-Path -LiteralPath $env:WORKBUDDY_PYTHON)) { return $env:WORKBUDDY_PYTHON }
+    foreach ($cand in @("python", "python3")) {
+        $c = Get-Command $cand -ErrorAction SilentlyContinue
+        if ($c -and $c.Source -notmatch 'WindowsApps' -and (Test-Path -LiteralPath $c.Source)) { return $c.Source }
+    }
+    $py = Get-PyLauncherExe
+    if ($py) { return $py }
+    return (Get-BundledPythonExe $configDir $installPath)
+}
+
+function Get-PythonSearchReport([string]$configDir, [string]$installPath = "") {
+    # 找不到解释器时打印"找过哪里"，不能只丢一句 python not found。
+    $lines = @("  - PATH: python / python3（WindowsApps 里的存根不算）")
+    $lines += "  - py launcher: py -3"
+    if ($configDir) { $lines += ("  - WorkBuddy 自带: {0}" -f (Join-Path $configDir "binaries\python\versions")) }
+    if ($installPath) { $lines += ("  - 安装目录自带: {0}" -f (Join-Path $installPath "resources\binaries\python\versions")) }
+    return ($lines -join [Environment]::NewLine)
 }
 
 function Invoke-Python([string]$pyExe, [string[]]$pyArgs) {
@@ -198,8 +248,12 @@ function Invoke-ProductOverrides($profile, $result) {
     $ovFiles = @(Get-ChildItem -LiteralPath $ovDir -Filter "*.compact.json" -ErrorAction SilentlyContinue)
     if ($ovFiles.Count -eq 0) { return }
     if (-not $profile.InstallPath) { Add-Note $result "product.json skipped (no install)"; return }
-    $py = Get-PythonExe $profile.ConfigDir
-    if (-not $py) { Add-Note $result "product.json skipped (python not found)"; return }
+    $py = Get-PythonExe $profile.ConfigDir $profile.InstallPath
+    if (-not $py) {
+        Add-Note $result "product.json FAILED: python not found"
+        $result.Status = "FAIL"
+        return
+    }
     $ovArgs = @((Join-Path $ScriptRoot "apply-product-overrides.py"))
     foreach ($f in $ovFiles) { $ovArgs += @("--overrides", $f.FullName) }
     $ovArgs += @("--install", $profile.InstallPath)
@@ -213,13 +267,17 @@ function Invoke-ProductOverrides($profile, $result) {
 
 function Invoke-AsarPatch($profile, $result) {
     if ($SkipAsarPatch -or $DryRun) { return }
-    $py = Get-PythonExe $profile.ConfigDir
+    $py = Get-PythonExe $profile.ConfigDir $profile.InstallPath
     $script = Join-Path $ScriptRoot "patch-asar.py"
     if (-not (Test-Path -LiteralPath $script)) { return }  # not shipped in the public package
     if (-not $profile.InstallPath) { return }
     $asar = Join-Path $profile.InstallPath "resources\app.asar"
     if (-not (Test-Path -LiteralPath $asar)) { return }
-    if (-not $py) { Add-Note $result "app.asar skipped (python not found)"; return }
+    if (-not $py) {
+        Add-Note $result "app.asar FAILED: python not found"
+        $result.Status = "FAIL"
+        return
+    }
     $prevIo = $env:PYTHONIOENCODING
     $env:PYTHONIOENCODING = "utf-8"
     $asarOut = @()
@@ -239,6 +297,14 @@ function Invoke-AsarPatch($profile, $result) {
         0 {
             if ($asarText -match 'already patched') { Add-Note $result "app.asar already patched" }
             else { Add-Note $result "app.asar patched" }
+            # asar 写完立刻刷新空闲预热进程：它们内存里还是旧代码，新聊天会复用到。
+            # 只停 kind=prewarm + status=idle（按 PID），不碰主程序/当前聊天。
+            $refresh = Join-Path $ScriptRoot "refresh-cli-prewarm.py"
+            if ($py -and (Test-Path -LiteralPath $refresh) -and $profile.ConfigDir) {
+                $pr = @(& $py -X utf8 $refresh --apply --config-dir $profile.ConfigDir 2>&1 | ForEach-Object { [string]$_ })
+                $stopped = @($pr | Where-Object { $_ -match '^stopped:' })
+                if ($stopped.Count -gt 0) { Add-Note $result ("prewarm " + $stopped[0]) }
+            }
         }
         2 {
             Add-Note $result "app.asar anchors not found - this build changed; nothing written"
@@ -281,9 +347,14 @@ function Invoke-UcSeenSeed($profile, $result) {
     # user-context「只发一次」的磁盘标记：给补丁上线前就存在的会话补一次，
     # 否则它们重启后第一条消息仍会被整段注入。补丁每次 compose 都读盘，补完立即生效。
     if ($SkipAsarPatch -or $DryRun) { return }
-    $py = Get-PythonExe $profile.ConfigDir
+    $py = Get-PythonExe $profile.ConfigDir $profile.InstallPath
     $script = Join-Path $ScriptRoot "uc-seen.py"
-    if (-not $py -or -not (Test-Path -LiteralPath $script)) { return }
+    if (-not (Test-Path -LiteralPath $script)) { return }
+    if (-not $py) {
+        Add-Note $result "uc-seen FAILED: python not found"
+        $result.Status = "FAIL"
+        return
+    }
     $seedArgs = @("-X", "utf8", $script, "--seed")
     if ($profile.ConfigDir) { $seedArgs += @("--config-dir", $profile.ConfigDir) }
     $prevIo = $env:PYTHONIOENCODING
@@ -328,7 +399,11 @@ function Invoke-DeployTarget($profile) {
     if (-not $writeInstall) { $applyArgs += "-NoInstall" }
 
     $code = Invoke-Child $applyArgs
-    if ($code -ne 0) { throw "apply.ps1 failed for $($profile.Name) (exit $code)" }
+    if ($code -ne 0) {
+        throw ("apply.ps1 failed for $($profile.Name) (exit $code). " +
+               "If the error says 0 files were written / no version directory, start WorkBuddy once, " +
+               "enter any mode, quit completely from the tray, then rerun deploy.")
+    }
 
     # 缓存层收口：空缓存 = 什么都没写进去（新电脑最常见），必须报出来而不是打印 OK。
     if (-not $NoPluginCache -and -not $DryRun) {
@@ -346,11 +421,13 @@ function Invoke-DeployTarget($profile) {
 
     Invoke-ProductOverrides $profile $result
     if (-not $SkipCliPatch) {
-        if (-not $isAdmin) { Add-Note $result "cli trim needs -Elevate (Program Files)" }
-        else {
-            $cli = Invoke-CliPatchTarget $profile
-            if ($cli.Note) { Add-Note $result ("cli: " + $cli.Note) }
-            if ($cli.Status -eq "FAIL") { $result.Status = "FAIL" }
+        # CLI chunk 在 app.asar.unpacked 下；能不能写取决于 ACL，不取决于当前会话是不是管理员。
+        # 直接试一次：失败（权限/锚点）一律 FAIL，并提示 -Elevate 或 wb-fix-lite.cmd。
+        $cli = Invoke-CliPatchTarget $profile
+        if ($cli.Note) { Add-Note $result ("cli: " + $cli.Note) }
+        if ($cli.Status -eq "FAIL") {
+            $result.Status = "FAIL"
+            if (-not $isAdmin) { Add-Note $result "if this is a permission error: rerun deploy.cmd -Elevate" }
         }
     }
     Invoke-AsarPatch $profile $result
@@ -454,8 +531,12 @@ function Invoke-AsarTarget($profile, [string]$mode) {
     if (-not $profile.Installed) { Add-Note $result "not installed"; return $result }
     $script = Join-Path $ScriptRoot "patch-asar.py"
     if (-not (Test-Path -LiteralPath $script)) { Add-Note $result "patch-asar.py not present"; return $result }
-    $py = Get-PythonExe $profile.ConfigDir
-    if (-not $py) { throw "python not found for $($profile.Name); set WORKBUDDY_PYTHON" }
+    $py = Get-PythonExe $profile.ConfigDir $profile.InstallPath
+    if (-not $py) {
+        Write-Host ("python not found for {0}. Searched:" -f $profile.Name) -ForegroundColor Red
+        Write-Host (Get-PythonSearchReport $profile.ConfigDir $profile.InstallPath) -ForegroundColor Red
+        throw "python not found for $($profile.Name); set WORKBUDDY_PYTHON or use scripts\wb-fix-lite.cmd"
+    }
     $asar = Join-Path $profile.InstallPath "resources\app.asar"
     if (-not (Test-Path -LiteralPath $asar)) { throw "app.asar not found under $($profile.InstallPath)" }
 
@@ -476,8 +557,9 @@ function Invoke-AsarTarget($profile, [string]$mode) {
     Invoke-Python $py $args
     $code = $LASTEXITCODE
     if ($code -eq 2) {
-        Add-Note $result "anchors not found in this build - nothing written"
-        $result.Status = "SKIP"
+        # 硬性契约：锚点未命中 = FAIL（补丁没打上），不许降级为 SKIP 后继续报成功。
+        Add-Note $result "asar anchors not found in this build - nothing written (FAIL, not SKIP)"
+        $result.Status = "FAIL"
         return $result
     }
     if ($code -ne 0) {
@@ -501,7 +583,7 @@ function Invoke-CliPatchTarget($profile) {
         $result.Status = "FAIL"
         return $result
     }
-    $py = Get-PythonExe $profile.ConfigDir
+    $py = Get-PythonExe $profile.ConfigDir $profile.InstallPath
     if (-not $py) {
         Add-Note $result "python not found for $($profile.Name)"
         $result.Status = "FAIL"
@@ -531,21 +613,20 @@ function Invoke-CliPatchTarget($profile) {
     }
     foreach ($line in $out) { Write-Host $line }
     if ($code -ne 0) {
-        # 锚点对不上（别的构建/别的混淆）不等于没救：轻量修法只需要
-        # "在 chunk 开头插一段 fetch 清理"，不依赖任何锚点、也不需要 Python。
+        # 锚点对不上（别的构建/别的混淆）必须 FAIL：这是"补丁没打上"，不是成功。
+        # 同时仍然执行免锚点的轻量出口清理（它至少能保证请求出口不含这些块），
+        # 但结论保持 FAIL，让退出码和 Summary 如实反映"锚点未命中"。
+        Add-Note $result "cli anchor patch FAILED (exit $code) - anchors not found in this build"
+        $result.Status = "FAIL"
         $lite = Join-Path $ScriptRoot "wb-fix-lite.ps1"
         if (Test-Path -LiteralPath $lite) {
-            Write-Host "anchor patch failed - falling back to the anchor-free fetch scrub" -ForegroundColor Yellow
+            Write-Host "anchor patch failed - applying the anchor-free fetch scrub as a fallback (result stays FAIL)" -ForegroundColor Yellow
             $lo = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $lite -Install $profile.InstallPath 2>&1 | ForEach-Object { [string]$_ })
             foreach ($line in $lo) { Write-Host $line }
             if (($lo -join "`n") -match '已写入|已有轻量补丁') {
-                $result.Status = "OK"
-                Add-Note $result "cli: anchor patch failed, anchor-free fetch scrub applied"
-                return $result
+                Add-Note $result "fallback: anchor-free fetch scrub applied (anchor FAILURE still stands)"
             }
         }
-        Add-Note $result "cli patch exit $code"
-        $result.Status = "FAIL"
         return $result
     }
     $st = @(& $py -X utf8 $script --status --file $distDir 2>&1 | ForEach-Object { [string]$_ })
@@ -568,19 +649,18 @@ function Invoke-CliPatchTarget($profile) {
 }
 
 function Set-WorkBuddyPython($profile) {
-    # 新电脑常常没有系统 Python；WorkBuddy 自带一个，install 目录里就有，
-    # 优先用它，避免 deploy 因为 "python not found" 直接跳过所有补丁。
-    if ($env:WORKBUDDY_PYTHON) { return }
-    if (-not $profile.InstallPath) { return }
-    foreach ($rel in @("resources\vendor\python\python.exe",
-                       "resources\app.asar.unpacked\resources\vendor\python\python.exe")) {
-        $p = Join-Path $profile.InstallPath $rel
-        if (Test-Path -LiteralPath $p) {
-            $env:WORKBUDDY_PYTHON = $p
-            Write-Host ("python: {0} (bundled with WorkBuddy)" -f $p) -ForegroundColor DarkGray
-            return
-        }
-    }
+    # 解释器顺序由 Get-PythonExe 统一决定（PATH python -> py -> WorkBuddy 自带）。
+    # 这里只把**解析结果**钉进环境变量，供子脚本复用；不能用"安装目录自带优先"
+    # 把 PATH 里的 python 顶掉，否则行为随机器不同而漂移。
+    if ($env:WORKBUDDY_PYTHON -and (Test-Path -LiteralPath $env:WORKBUDDY_PYTHON)) { return }
+    $resolved = Get-PythonExe $profile.ConfigDir $profile.InstallPath
+    if (-not $resolved) { return }
+    $env:WORKBUDDY_PYTHON = $resolved
+    $origin = if ($resolved -like (Join-Path $profile.InstallPath "*") -or
+                   ($profile.ConfigDir -and $resolved -like (Join-Path $profile.ConfigDir "*"))) {
+        "bundled with WorkBuddy"
+    } else { "from PATH / py launcher" }
+    Write-Host ("python: {0} ({1})" -f $resolved, $origin) -ForegroundColor DarkGray
 }
 
 function Get-CacheTemplateStats($profile) {
@@ -663,19 +743,27 @@ function Start-WorkBuddyIfClosed($profiles) {
 
 function Invoke-StackVerify($profiles) {
     # 收口验收：把每一层的真实状态打出来。模型说“还在”不算证据，脚本读文件/读 trace 才算。
+    if ($DryRun) {
+        Write-Host "dry-run: acceptance not run (nothing was written)." -ForegroundColor DarkGray
+        return 0
+    }
     $script = Join-Path $ScriptRoot "verify-stack.py"
     if (-not (Test-Path -LiteralPath $script)) {
-        Write-Host "verify-stack.py not present - acceptance skipped" -ForegroundColor Yellow
-        return 0
+        # 验收脚本缺失 = 没有任何"真实状态"证据；不许当成通过。
+        Write-Host "verify-stack.py not present - acceptance could NOT run (not a pass)" -ForegroundColor Red
+        return 1
     }
     $py = $null
     foreach ($p in $profiles) {
-        if ($p.ConfigDir) { $py = Get-PythonExe $p.ConfigDir; if ($py) { break } }
+        if ($p.ConfigDir) { $py = Get-PythonExe $p.ConfigDir $p.InstallPath; if ($py) { break } }
     }
     if (-not $py) { $py = Get-PythonExe $null }
     if (-not $py) {
-        Write-Host "python not found - acceptance skipped" -ForegroundColor Yellow
-        return 0
+        # 验收层没有 Python 就没有任何"真实状态"证据；不许当成通过（返回非 0，由调用方计失败）。
+        Write-Host "python not found - acceptance could NOT run (not a pass)" -ForegroundColor Red
+        Write-Host (Get-PythonSearchReport "") -ForegroundColor Red
+        Write-Host "  Python 不是部署的硬依赖：scripts\wb-fix-lite.cmd 是免 Python/Node 的兜底路径。" -ForegroundColor Yellow
+        return 1
     }
     $report = Join-Path $ProjectRoot "reports\verify-latest.txt"
     $dir = Split-Path -Parent $report
@@ -725,6 +813,34 @@ if ($action -eq "list") {
 try { $profiles = @(Resolve-TargetProfiles -Names $Target -ScriptRoot $ScriptRoot -InstallOverride $WorkBuddyPath -ConfigOverride $ConfigDir) }
 catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }
 Write-Host ("== {0}: {1} target(s): {2} ==" -f $action, $profiles.Count, (($profiles | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Cyan
+
+# 预检：需要 Python 的动作在开写之前就确认解释器存在。三条来源都没有时打印缺失清单
+# 并指向免 Python/Node 的兜底路径；不允许走到一半再崩、更不允许静默跳过。
+$pyActions = @("deploy", "cli-patch", "asar", "asar-restore")
+if (($pyActions -contains $action) -and -not $DryRun) {
+    $preflightPy = $null
+    foreach ($p in $profiles) {
+        $preflightPy = Get-PythonExe $p.ConfigDir $p.InstallPath
+        if ($preflightPy) { break }
+    }
+    if (-not $preflightPy) { $preflightPy = Get-PythonExe $null }
+    if (-not $preflightPy) {
+        Write-Host ""
+        Write-Host "!! Python not found - cannot run '$action' safely." -ForegroundColor Red
+        Write-Host "   Searched (in this order):" -ForegroundColor Red
+        $reportCfg = if ($profiles.Count -gt 0) { $profiles[0].ConfigDir } else { "" }
+        $reportInstall = if ($profiles.Count -gt 0) { $profiles[0].InstallPath } else { "" }
+        Write-Host (Get-PythonSearchReport $reportCfg $reportInstall) -ForegroundColor Red
+        Write-Host ""
+        Write-Host "   Fix one of these:" -ForegroundColor Yellow
+        Write-Host "     1) install Python 3 and tick 'Add to PATH'" -ForegroundColor Yellow
+        Write-Host "     2) start WorkBuddy once so its bundled runtime is unpacked" -ForegroundColor Yellow
+        Write-Host "     3) run scripts\wb-fix-lite.cmd  (no Python / no Node, applies the CLI fetch scrub)" -ForegroundColor Yellow
+        Write-Host "   Nothing was written." -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host ("python  : {0}" -f $preflightPy) -ForegroundColor DarkGray
+}
 if ($action -eq "deploy") {
     Assert-SkillSources
     $scope = if ($Template -or $Source -or $Skill) { "selected" } else { "all files" }

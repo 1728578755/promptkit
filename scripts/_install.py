@@ -209,18 +209,20 @@ def _shortcut_roots():
     if os.name != "nt":
         return []
     # 用 .NET 的已知文件夹取路径，避免在 Python 里拼引号/反斜杠。
+    # 全部 raw string：PowerShell 里的 `\M` / `\D` / `\.` 是字面反斜杠，
+    # 写成普通字符串会触发 SyntaxWarning（未来版本 = SyntaxError）。
     ps = (
-        "$ErrorActionPreference='SilentlyContinue';"
-        "$dirs=@("
-        "(Join-Path ([Environment]::GetFolderPath('CommonStartMenu')) 'Programs'),"
-        "(Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'),"
-        "[Environment]::GetFolderPath('Desktop'),"
-        "[Environment]::GetFolderPath('CommonDesktopDirectory'));"
-        "$sh=New-Object -ComObject WScript.Shell;"
-        "foreach($d in $dirs){ if(Test-Path -LiteralPath $d){"
-        " Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -Depth 2 -ErrorAction SilentlyContinue |"
-        " ForEach-Object { $t=$sh.CreateShortcut($_.FullName).TargetPath;"
-        " if($t -match 'WorkBuddy.*\\.exe$'){ $t } } } }"
+        r"$ErrorActionPreference='SilentlyContinue';"
+        r"$dirs=@("
+        r"(Join-Path ([Environment]::GetFolderPath('CommonStartMenu')) 'Programs'),"
+        r"(Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'),"
+        r"[Environment]::GetFolderPath('Desktop'),"
+        r"[Environment]::GetFolderPath('CommonDesktopDirectory'));"
+        r"$sh=New-Object -ComObject WScript.Shell;"
+        r"foreach($d in $dirs){ if(Test-Path -LiteralPath $d){"
+        r" Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -Depth 2 -ErrorAction SilentlyContinue |"
+        r" ForEach-Object { $t=$sh.CreateShortcut($_.FullName).TargetPath;"
+        r" if($t -match 'WorkBuddy.*\.exe$'){ $t } } } }"
     )
     try:
         p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
@@ -237,8 +239,16 @@ def _shortcut_roots():
 
 
 def scan_locations():
-    """磁盘扫描会看的位置（给诊断报告用，说明"找过哪里"）。"""
+    """磁盘扫描会看的位置（给诊断报告用，说明"找过哪里"）。
+
+    盘根、Program Files / Program Files (x86) / Apps / Programs / Software、
+    每个用户的 %LocalAppData%\\Programs，以及当前用户自己的
+    %LOCALAPPDATA%\\Programs（其它盘上的用户目录不一定被列出来）。
+    """
     bases = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        bases.append(os.path.join(local, "Programs"))
     for letter in "CDEFGHIJK":
         drive = letter + ":\\"
         if not os.path.isdir(drive):

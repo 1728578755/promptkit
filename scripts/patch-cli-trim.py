@@ -312,39 +312,199 @@ def node_check(path):
     return True, "node --check OK"
 
 
+def _fail_with_context(data, label, needle=b"", span=160):
+    """锚点找不到 -> 硬失败，并把锚点附近的字节打出来。
+
+    规范要求：任何 "锚点未命中" 都必须 FAIL（非零退出码）+ 明确原因 + 锚点上下文字节，
+    不许降级为 SKIP 后继续报成功。needle 为空时打印模块头附近。
+    """
+    at = data.find(needle) if needle else 0
+    if at < 0:
+        at = 0
+    lo = max(0, at - span)
+    hi = min(len(data), at + len(needle) + span if needle else at + span * 2)
+    snippet = data[lo:hi]
+    try:
+        text = snippet.decode("utf-8", "backslashreplace")
+    except Exception:
+        text = repr(snippet)
+    sys.stderr.write("[FAIL] anchor not found: %s\n" % label)
+    sys.stderr.write("       chunk bytes=%d, context at %d..%d:\n" % (len(data), lo, hi))
+    sys.stderr.write("       ----8<----\n")
+    sys.stderr.write(text.replace("\r\n", "\n"))
+    sys.stderr.write("\n       ----8<----\n")
+    raise SystemExit(2)
+
+
 def replace_once(data, old, new, label):
     n = data.count(old)
     if n == 0:
         if data.count(new) >= 1:
             return data, "already"
-        raise SystemExit("[FAIL] anchor not found: %s" % label)
+        _fail_with_context(data, label, old)
     if n != 1:
-        raise SystemExit("[FAIL] anchor %s matched %d times" % (label, n))
+        raise SystemExit("[FAIL] anchor %s matched %d times (want exactly 1)" % (label, n))
     return data.replace(old, new, 1), "patched"
 
 
-RE_INS_RAW = re.compile(rb"systemInstructions:(?!__wbStripLegacyAny\()[A-Za-z$_][\w$]*\.modelInput\.instructions,")
-RE_IN_RAW = re.compile(rb"input:(?!__wbCleanRuntimeInput\()[A-Za-z$_][\w$]*\.modelInput\.input,")
+INJECT_KEYWORDS = (b"systemInstructions:", b"input:")
+
+# 收口用：任何"还没包上"的注入点（不看数量，只看有没有漏网的）。
+RE_INS_RAW = re.compile(rb"(?<![A-Za-z0-9_$])systemInstructions:(?!__wbStripLegacyAny\()"
+                        rb"[A-Za-z$_][\w$]*\.modelInput\.instructions,")
+RE_IN_RAW = re.compile(rb"(?<![A-Za-z0-9_$])input:(?!__wbCleanRuntimeInput\()"
+                       rb"[A-Za-z$_][\w$]*\.modelInput\.input,")
+
+
+def _dynamic_inject_points(data):
+    """用对混淆名不敏感的结构化正则定位注入点，返回 [(kind, var, start, end), …]。
+
+    kind    : "instructions" | "input"
+    var     : chunk 里的实际标识符（g / w / a … 由内容决定，不假设具体字母）
+    结构化正则：
+      instructions:  <任意标识符>.modelInput.instructions  紧跟在 systemInstructions: 之后，
+                     且前面不能已经包过 __wbStripLegacyAny(
+      input:         <任意标识符>.modelInput.input         紧跟在 input: 之后（前面不能是
+                     systemInstructions: / previousResponseId: 等别的键），且没包过 __wbCleanRuntimeInput(
+
+    两种真实形态都覆盖：
+      systemInstructions:g.modelInput.instructions,prompt:…
+      …input:g.modelInput.input,previousResponseId:…
+    """
+    points = []
+
+    # 1) instructions：systemInstructions:<IDENT>.modelInput.instructions,
+    pat = re.compile(rb"(?<![A-Za-z0-9_$])systemInstructions:((?!__wbStripLegacyAny\()"
+                     rb"([A-Za-z$_][\w$]*)\.modelInput\.instructions),")
+    for m in pat.finditer(data):
+        points.append(("instructions", m.group(2), m.start(), m.end()))
+
+    # 2) input：input:<IDENT>.modelInput.input, —— 但排除 previousResponseId:"input" 之类
+    #    只在 "input:" 是对象字面量的键时匹配：前面必须是 { 或 ,（允许空白）。
+    pat_in = re.compile(rb"(?<![A-Za-z0-9_$])input:((?!__wbCleanRuntimeInput\()"
+                        rb"([A-Za-z$_][\w$]*)\.modelInput\.input),")
+    for m in pat_in.finditer(data):
+        # 前面紧邻的字符决定它是不是一个真正的对象键（而不是 previousResponseId:"input"）
+        j = m.start() - 1
+        while j >= 0 and data[j:j + 1] in b" \t\r\n":
+            j -= 1
+        if j >= 0 and data[j:j + 1] not in (b"{", b","):
+            continue
+        points.append(("input", m.group(2), m.start(), m.end()))
+
+    # 去重（同一站点可能被两个正则同时命中，例如 input: 前面恰好是 {）
+    seen, out = set(), []
+    for kind, var, s, e in points:
+        key = (kind, s)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((kind, var, s, e))
+    return out
+
+
+def _injection_groups(data):
+    """按"承载对象标识符"归组所有 modelInput 注入点：{ident: {(kind, state), …}}。
+
+    真实构建里每个 provider 分支的对象（g / w / a …）都同时有 instructions 与 input。
+    这个对称性是**结构事实**，与混淆名无关；用它可以在"某个调用点被改名/换了形态"时
+    发现缺口——只看"还能找到几个"会漏掉被改坏的那一个。
+    """
+    groups = {}
+    pats = (
+        ("instructions", "raw",
+         re.compile(rb"(?<![A-Za-z0-9_$])systemInstructions:(?!__wbStripLegacyAny\()"
+                    rb"([A-Za-z$_][\w$]*)\.modelInput\.instructions,")),
+        ("instructions", "wrapped",
+         re.compile(rb"systemInstructions:__wbStripLegacyAny\("
+                    rb"([A-Za-z$_][\w$]*)\.modelInput\.instructions\)")),
+        ("input", "raw",
+         re.compile(rb"(?<![A-Za-z0-9_$])input:(?!__wbCleanRuntimeInput\()"
+                    rb"([A-Za-z$_][\w$]*)\.modelInput\.input,")),
+        ("input", "wrapped",
+         re.compile(rb"input:__wbCleanRuntimeInput\(([A-Za-z$_][\w$]*)\.modelInput\.input\)")),
+    )
+    for kind, state, pat in pats:
+        for m in pat.finditer(data):
+            groups.setdefault(m.group(1), set()).add((kind, state))
+    return groups
+
+
+def _symmetry_gaps(data):
+    """返回 [(ident, 缺什么), …]：每个 modelInput 对象必须两种注入点都在、且都没漏包。"""
+    gaps = []
+    for ident, states in sorted(_injection_groups(data).items()):
+        kinds = {k for k, _s in states}
+        for kind in ("instructions", "input"):
+            if kind not in kinds:
+                gaps.append((ident, "missing %s call site" % kind))
+                continue
+            if (kind, "raw") in states:
+                gaps.append((ident, "un-wrapped %s call site" % kind))
+            if (kind, "wrapped") not in states:
+                gaps.append((ident, "no wrapped %s call site" % kind))
+    return gaps
+
+
+def discover_module_ids(data, path=""):
+    """模块 ID 从安装的 chunk 文件名 / 内容里发现，不假设 "1849"。
+
+    返回 (ids, evidence)：
+      ids      : 发现到的模块 id 列表（去重、保持出现顺序）
+      evidence : [(来源, id), …]，给 --status / 失败信息用
+    """
+    ids, evidence, seen = [], [], set()
+
+    def add(value, source):
+        if not value:
+            return
+        v = value.decode("ascii", "replace") if isinstance(value, bytes) else str(value)
+        v = v.strip().strip('"').strip("'")
+        if not v or v in seen:
+            return
+        seen.add(v)
+        ids.append(v)
+        evidence.append((source, v))
+
+    head = data[:8192]
+    m = re.search(rb"__rspack_esm_ids=\[([^\]]*)\]", head)
+    if m:
+        for part in re.findall(rb'"([^"]+)"|\'([^\']+)\'|(\d+)', m.group(1)):
+            add(next((x for x in part if x), b""), "content:__rspack_esm_ids")
+    m = re.search(rb"__rspack_esm_id=\"([^\"]+)\"", head)
+    if m:
+        add(m.group(1), "content:__rspack_esm_id")
+    if path:
+        m = re.match(r"^(\d+)\.[0-9a-fA-F]+\.mjs$", os.path.basename(path))
+        if m:
+            add(m.group(1), "filename")
+    return ids, evidence
 
 
 def _anchor_of(data):
-    """定位模块头的 rspack id 语句，按语句边界取，不写死 id。"""
-    i = data.find(ANCHOR_PREFIX)
-    if i < 0:
-        return None
-    j = data.find(b";", i)
-    if j < 0:
-        return None
-    return data[i:j + 1]
+    """定位模块头的 rspack id 语句，按语句边界取，不写死 id。
+
+    新版打包器可能只导出 __rspack_esm_id="1849"（单数），也可能两个都有。
+    锚点取"含 rspack id 的整条 export 语句"，不依赖具体 id 值。
+    """
+    for prefix in (ANCHOR_PREFIX, b"export const __rspack_esm_id="):
+        i = data.find(prefix)
+        if i < 0:
+            continue
+        j = data.find(b";", i)
+        if j < 0:
+            continue
+        return data[i:j + 1]
+    return None
 
 
-def patch(data):
+def patch(data, path=""):
     log = []
     if MARK.encode() not in data:
         anchor = _anchor_of(data)
         if not anchor:
-            raise SystemExit("[FAIL] module header anchor not found "
-                             "(no 'export const __rspack_esm_ids=[' statement)")
+            _fail_with_context(data, "module header (__rspack_esm_ids / __rspack_esm_id)",
+                               b"__rspack_esm_id")
         data = data.replace(anchor, anchor + HELPER.encode() + SCRUB.encode(), 1)
         log.append(("helper", "patched"))
     else:
@@ -353,9 +513,10 @@ def patch(data):
         b = data.find(HELPER_BEGIN.encode())
         e = data.find(HELPER_END.encode())
         if b < 0 or e < b:
-            raise SystemExit("[FAIL] helper markers not found in patched chunk")
+            _fail_with_context(data, "helper markers in an already-patched chunk", HELPER_BEGIN.encode())
         current = data[b:e + len(HELPER_END)]
-        if b"__wbBlank" not in current:
+        if b"__wbBlank" not in current or b"__wbDropReminder" not in current:
+            # 旧版 helper（没有 __wbBlank/__wbDropReminder）：整段换成仓库里的当前版本。
             data = data.replace(current, HELPER.encode(), 1)
             log.append(("helper-upgrade", "patched"))
         else:
@@ -363,28 +524,75 @@ def patch(data):
         if b"__wbScrubFetch" not in data:
             data = data.replace(HELPER_END.encode(), SCRUB.encode() + HELPER_END.encode(), 1)
             log.append(("fetch-scrub", "patched"))
+        elif b"/*__wbTrimScrub*/" not in data:
+            # 旧版 helper 有 __wbScrubFetch 定义却没有 Scrub 段标记（v3 早期），
+            # 补上标记并不改语义，只是让 is_patched() 的检查口径一致。
+            raise SystemExit("[FAIL] chunk has __wbScrubFetch but no /*__wbTrimScrub*/ marker; "
+                             "restore the original chunk and re-apply (--restore)")
         else:
             log.append(("fetch-scrub", "already"))
 
-    # 变量名（压缩后常是 g/w/a…）不写死：从调用点自己发现。
+    # 注入点用结构化正则定位；变量名（压缩后常是 g/w/a…）从内容里发现，不假设具体字母。
     # 每个 provider 分支各有一处 systemInstructions / input。
-    ins_vars = sorted(set(re.findall(rb"systemInstructions:([A-Za-z$_][\w$]*)\.modelInput\.instructions,", data)))
-    in_vars = sorted(set(re.findall(rb"input:([A-Za-z$_][\w$]*)\.modelInput\.input,", data)))
-    if not ins_vars:
-        raise SystemExit("[FAIL] no 'systemInstructions:X.modelInput.instructions,' found")
-    if not in_vars:
-        raise SystemExit("[FAIL] no 'input:X.modelInput.input,' found")
+    # 两类情况不许混为一谈：
+    #   * 一个未包装的调用点都没有，但已经有包装过的 -> 已经打好了（helper 可能刚升级过）
+    #   * 连包装过的都没有 / 还有未包装的 -> 锚点对不上，硬失败并打印上下文
+    points = _dynamic_inject_points(data)
+    ins = [(v, s, e) for kind, v, s, e in points if kind == "instructions"]
+    inp = [(v, s, e) for kind, v, s, e in points if kind == "input"]
 
-    for var in ins_vars:
-        old = b"systemInstructions:" + var + b".modelInput.instructions,"
+    # 结构化对称性检查只对"已经打过补丁"的形态生效（此时每个对象两种调用点都应已包好）。
+    # 原始 chunk 里所有调用点都未包装，属于正常输入，不能因此失败。
+    if not ins and not inp:
+        gaps = _symmetry_gaps(data)
+        if gaps:
+            detail = "; ".join("%s: %s" % (ident.decode("ascii", "replace"), why) for ident, why in gaps)
+            _fail_with_context(data, "modelInput injection sites are asymmetric (%s)" % detail,
+                               b".modelInput.instructions,")
+
+    if not ins:
+        if RE_INS_RAW.search(data) or data.count(b"__wbStripLegacyAny(") == 0:
+            _fail_with_context(data, "systemInstructions:<ident>.modelInput.instructions",
+                               b"systemInstructions:")
+        log.append(("instructions", "already"))
+    if not inp:
+        if RE_IN_RAW.search(data) or data.count(b"__wbCleanRuntimeInput(") == 0:
+            _fail_with_context(data, "input:<ident>.modelInput.input", b"modelInput.input")
+        log.append(("input", "already"))
+
+    ids, evidence = discover_module_ids(data, path)
+    if evidence:
+        log.append(("module-id", ", ".join("%s->%s" % (src, v) for src, v in evidence)))
+
+    # 从后往前替换：偏移量不受前面替换影响。只替换每个站点的精确字节区间。
+    edits = []
+    for var, s, e in ins:
+        old = data[s:e]
         new = b"systemInstructions:__wbStripLegacyAny(" + var + b".modelInput.instructions),"
-        data, st = replace_once(data, old, new, "instructions(%s)" % var.decode("ascii", "replace"))
-        log.append(("instructions:%s" % var.decode("ascii", "replace"), st))
-    for var in in_vars:
-        old = b"input:" + var + b".modelInput.input,"
+        edits.append((s, e, old, new, "instructions(%s)" % var.decode("ascii", "replace")))
+    for var, s, e in inp:
+        old = data[s:e]
         new = b"input:__wbCleanRuntimeInput(" + var + b".modelInput.input),"
-        data, st = replace_once(data, old, new, "input(%s)" % var.decode("ascii", "replace"))
-        log.append(("input:%s" % var.decode("ascii", "replace"), st))
+        edits.append((s, e, old, new, "input(%s)" % var.decode("ascii", "replace")))
+
+    for s, e, old, new, label in sorted(edits, key=lambda x: x[0], reverse=True):
+        data = data[:s] + new + data[e:]
+        log.append((label, "patched"))
+
+    # 收口：替换后必须一处 raw 都不剩；还剩就硬失败（而不是打一半算成功）。
+    leftover = len(RE_INS_RAW.findall(data)) + len(RE_IN_RAW.findall(data))
+    if leftover:
+        raise SystemExit("[FAIL] %d injection site(s) still un-wrapped after patch" % leftover)
+
+    # 收口 2：打完补丁的形态必须对称 —— 每个 modelInput 对象两种调用点都包上了。
+    # 某个分支被改名/换了形态时，这里会发现"只包了一半"。
+    gaps = _symmetry_gaps(data)
+    if gaps:
+        detail = "; ".join("%s: %s" % (ident.decode("ascii", "replace"), why) for ident, why in gaps)
+        # 上下文锚点用 ".modelInput."（被改坏的站点多半就是删掉了 .modelInput.instructions，
+        # 拿它当锚会定位不到，反而打印文件头）。同对象的 input 注入点通常还在附近。
+        _fail_with_context(data, "patch left asymmetric injection sites (%s)" % detail,
+                           b".modelInput.")
     return data, log
 
 
@@ -399,6 +607,7 @@ def version_of(data):
 
 def is_patched(data):
     # 不数"打了几处"（不同构建的分支数不同），改看"还有没有没包上的调用点"。
+    # fetch-scrub 用"定义 + 调用"两处来判断（__wbScrubFetch 在 SCRUB 里出现两次）。
     return (
         version_of(data) == TRIM_VERSION
         and not RE_INS_RAW.search(data)
@@ -567,6 +776,9 @@ def main():
         if args.status:
             ok = is_patched(data)
             print("version: %d (expected %d)" % (version_of(data), TRIM_VERSION))
+            ids, evidence = discover_module_ids(data, path)
+            if evidence:
+                print("module: %s" % ", ".join("%s->%s" % (src, v) for src, v in evidence))
             print("status: %s" % ("PATCHED" if ok else "NOT PATCHED"))
             rc = 0 if ok else 1
             continue
@@ -617,7 +829,7 @@ def main():
             data = read(src)
             print("bytes:  %d (restored original)" % len(data))
 
-        new_data, log = patch(data)
+        new_data, log = patch(data, path)
         for name, st in log:
             print("  %-24s %s" % (name, st))
         print("bytes:  %d -> %d" % (len(data), len(new_data)))

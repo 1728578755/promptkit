@@ -651,6 +651,15 @@ if ($createdSkills.Count -gt 0) {
 Write-Host ("Cache copies:  {0}" -f $cacheTotal)
 Write-Host ""
 
+# 冷启动缺失：新电脑上客户端还没启动过 -> 缓存里没有任何版本目录 -> 下面会"成功"写 0 个文件。
+# 这不是成功，必须硬失败并明确告诉用户下一步；否则用户会看到 Summary: OK 而实际什么都没变。
+$coldStart = (-not $NoPluginCache) -and (-not $DryRun) -and ($cacheTotal -eq 0) -and ($installCount -eq 0)
+if ($coldStart) {
+    throw ("0 files written: no writable target. Plugin cache has no version directory yet " +
+           "($cacheRoot). Start WorkBuddy once, enter any mode, quit completely from the tray, " +
+           "then rerun deploy. (refusing to report success when nothing was written)")
+}
+
 if ($PSBoundParameters.ContainsKey('Verbose')) {
     foreach ($item in $prepared) {
         $caches = @($item.CacheTargets)
@@ -677,6 +686,21 @@ Write-Host ""
 if ($DryRun) {
     Write-Host "[DryRun] No files were written."
     exit 0
+}
+
+# 缓存层写入不碰 asar，运行中的客户端也能写；但安装镜像侧（resources\*）会被镜像锁定。
+# 先明确报出占用者（进程名 + PID），失败时用户才知道该关哪个。脚本从不结束进程。
+if (-not $NoInstall -and $installCount -gt 0) {
+    $procPattern = if ($targetProfile.ExeName) {
+        [IO.Path]::GetFileNameWithoutExtension($targetProfile.ExeName)
+    } else { "WorkBuddy" }
+    $running = @(Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessName -like "$procPattern*" -or $_.ProcessName -like "codebuddy*" })
+    if ($running.Count -gt 0) {
+        # 只提示：缓存侧照写；安装镜像侧若真被锁，下面的 Copy-FileLong 会抛错并以非 0 退出。
+        Write-Host ("running : {0}" -f (($running | ForEach-Object { "$($_.ProcessName)(pid=$($_.Id))" }) -join ", ")) -ForegroundColor Yellow
+        Write-Host "          安装镜像侧可能被镜像锁定；缓存侧不受影响。要写安装镜像请先完全退出（含托盘）。" -ForegroundColor Yellow
+    }
 }
 
 if (-not (Test-Admin) -and -not $NoElevate) {
@@ -779,7 +803,19 @@ foreach ($item in $prepared) {
     if (-not $NoInstall -and ($item.TargetExists -or $item.CanCreate)) {
         $installDir = [IO.Path]::GetDirectoryName($item.TargetPath)
         if (-not (Test-Path -LiteralPath $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
-        Copy-FileLong $item.Source $item.TargetPath
+        try {
+            Copy-FileLong $item.Source $item.TargetPath
+        } catch {
+            # WinError 32 = 运行中的客户端把安装目录里的文件锁住了。报出进程名/PID 再失败，
+            # 绝不半途"看起来成功"。
+            $holders = @(Get-Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.ProcessName -match '^(WorkBuddy.*|codebuddy.*)$' })
+            $who = if ($holders.Count -gt 0) {
+                ($holders | ForEach-Object { "$($_.ProcessName)(pid=$($_.Id))" }) -join ", "
+            } else { "(no WorkBuddy process visible; file may be locked by another user/session)" }
+            throw ("Cannot write install mirror '$($item.TargetPath)' - file is locked. Holders: $who. " +
+                   "Quit WorkBuddy completely (including the tray icon) and rerun. Nothing was force-killed.")
+        }
         $after = Get-FileHashLong $item.TargetPath
         if ($after -ne $item.NewHash) {
             throw "Hash mismatch after copy: $($item.Target) target=$after expected=$($item.NewHash)"
@@ -802,6 +838,13 @@ foreach ($item in $prepared) {
     }
 }
 
+
+if ($written -eq 0) {
+    # 兜底：任何路径算出 0 个可写目标都不许算成功（冷启动 / 缓存空 / 目标全不存在）。
+    throw ("0 files written. Nothing changed - refusing to report success. " +
+           "Plugin cache: $cacheRoot ; install: $(if ($wb) { $wb } else { '(cache only)' }). " +
+           "Start WorkBuddy once, enter any mode, quit completely from the tray, then rerun deploy.")
+}
 
 $manifest.status = "applied"
 Write-TextNoBom $manifestPath ($manifest | ConvertTo-Json -Depth 8)

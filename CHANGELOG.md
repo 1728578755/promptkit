@@ -2,6 +2,82 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.18 — 2026-11-21
+
+主题：**新环境（全新电脑/新安装）部署失败的九项根因修复（A–I）**。
+来源：`DIAGNOSIS-NEW-ENVIRONMENT.md` 深度诊断，逐条对应修复；全部验证走副本与伪造
+`USERPROFILE` 的仿真环境，未触碰任何真实安装。
+
+### A. `scripts/target.ps1` —— 与 `_install.py` 探测裂脑（新环境致命）
+原来只认注册表 / App Paths / 快捷方式，绿色版、解压版、便携版安装直接报
+"No installation found"。现在与诊断层 `install_roots_deep()` 对齐：
+- 新增 `Test-LooksLikeWorkBuddy`（目录名 / `WorkBuddy*.exe` / `product.json` 内容判据，
+  与 `_install._looks_like_workbuddy()` 同一套规则）与 `Test-ClientDataDir`；
+- 兜底扫描扩到盘根（C–K）、`Program Files` / `(x86)` / Apps / Programs / Software、
+  每个用户的 `AppData\Local\Programs`、`WORKBUDDY_INSTALL` 显式线索；
+- 结果合并去重：父目录已是候选的子目录（`resources\`、`share-target\` 里也有
+  `WorkBuddy*.exe`）被剪掉——这个假 target 是本轮新发现并修掉的；
+- 反查不到数据目录时，仅在本机只有一套安装且恰有一个像数据目录的 `.workbuddy*`
+  时才配对（`Get-LooseConfigDir`），避免多安装互相污染。
+另修：`.skill-list-cache.json` 的 `scopeKey` 实际是"JSON 数组的字符串"，原配对代码
+一直解析失败；已修，便携安装现在能正确配到数据目录。
+
+### B. `scripts/doctor.py` —— 多安装一票否决误报
+一台机器上闲置的那套安装没打补丁时，全局结论被打成 NOT EFFECTIVE、退出码 1，
+即使当前使用的安装全部 PASS。现在结论由纯函数 `decide()` 计算：
+- "当前使用"只认"有进程正在从它运行"（不再回退到 trace 所属配置——trace 可能来自
+  旧会话）；
+- 未在使用的安装问题降级为 WARN，不再拖垮全局结论；
+- 10 条单测（`_selftest/test-doctor-decide.py`，`python -I` 运行）覆盖便携/注册表缺失
+  等场景，不是碰巧通过。
+
+### C. `scripts/doctor-basic.ps1` —— 无 Python 兜底诊断的两个盲区
+- 只看 `.workbuddy`，不认 `.workbuddy-ai` 等变体目录 → 现在逐个探测变体；
+- 完全不检查模板缓存层 → 现在检查 `welcomemode-*/prompt.tpl` 是否存在、8 个废弃
+  策略块（tool_usage_policy / result_presentation / final_answer_instructions /
+  task_management / agent_skills / quality_policy / agent_loop / regional_conventions）
+  是否已剔除（removed_hits）。
+
+### D. `scripts/_install.py` —— 反斜杠转义 SyntaxWarning
+PowerShell 命令字符串里 `\M` `\D` `\.` 等未用 raw string，Python 3.12+ 触发
+SyntaxWarning，未来版本会变 SyntaxError 直接崩。已全部改为 raw string /
+双反斜杠；`python -W error::SyntaxWarning -c "import _install"` 零警告。
+
+### E. 冷启动缓存缺失的"静默假成功"（新环境致命）
+新电脑还没启动过客户端时，插件缓存目录为空，部署脚本打印 `Summary: OK` 但实际
+写入 0 个文件。现在写入数为 0 必须非零退出失败，并明确提示"请先启动客户端一次
+再部署"；严禁静默 OK。
+
+### F. 无 Python / Node 时 deploy.ps1 不再裸崩
+解释器按顺序查找：PATH 里的 python → py launcher → WorkBuddy 自带
+`binaries\python\versions`；三处都没有时打印清晰缺失清单并指向免 Python/Node 的
+`wb-fix-lite.cmd`，退出码非零，不静默跳过。
+
+### G. asar 被运行中客户端锁定时的可诊断性
+`patch-asar.py` / `apply.ps1` 在写 asar 前检测 `WorkBuddy*` / `codebuddy` 运行进程，
+直接打印进程名与 PID（原来只抛 `[WinError 32]`）；asar 写完后调用
+`refresh-cli-prewarm.py --apply` 刷新空闲预热进程，避免新聊天复用旧 chunk。
+
+### H. `scripts/patch-cli-trim.py` —— 脆弱硬编码改为动态发现
+- 模块导出 ID 不再写死 `1849`：从已安装 chunk 文件名/内容动态发现；
+- `systemInstructions` 注入点定位改用对混淆名不敏感的结构化正则（捕获实际标识符
+  再引用，不再假设 `g` / `w`），并加对称性校验；
+- 任何锚点找不到 → 硬失败，打印锚点上下文字节，严禁"找不到就跳过"。
+仿真验证：锚点被改坏 → 非零退出并指名缺失锚点；锚点正常 → PATCHED；两种情况
+都"未写入任何字节"才算通过。
+
+### I. 旧会话历史自污染的显著提示
+doctor.py 结论区现在显式输出："验证必须新开空白会话——旧会话历史里本来就存着
+旧块"，避免把历史残留误判为补丁失效。
+
+### 验收（全部真实运行）
+- `python -X utf8 scripts/doctor.py` exit 0，双安装 PASS（不比修复前差）；
+- `python -W error::SyntaxWarning -c "import _install"` 零警告；
+- `powershell -File scripts/doctor-basic.ps1` 输出 `.workbuddy-ai` 与模板层检查；
+- `_selftest/run-newenv-tests.ps1` 17/17 PASS：冷启动 0 写入→FAIL+提示；无 Python→
+  缺失清单+指向 wb-fix-lite；好锚点 PATCHED / 坏锚点 FAIL+上下文字节；
+- `node scripts/release-audit.js` RELEASE OK。
+
 ## v1.3.17 — 2026-11-21
 
 > 本版只修一处：`doctor.py` 里那条提示字符串不是 raw string，Python 3.12+ 首次运行会打印

@@ -53,6 +53,23 @@ function Test-TargetInstallRoot([string]$path, [string]$exeName) {
     return $false
 }
 
+# 扫描出来的目录必须真的像 WorkBuddy：只靠 resources\app.asar 会把别家 Electron 应用也收进来。
+# 判据与 _install.py 的 _looks_like_workbuddy() 对齐：目录名 / WorkBuddy*.exe / product.json。
+function Test-LooksLikeWorkBuddy([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    if ((Split-Path -Leaf $path) -like "*WorkBuddy*") { return $true }
+    if (Get-ProductExe $path) { return $true }
+    $product = Join-Path $path "resources\app.asar.unpacked\cli\product.json"
+    if (Test-Path -LiteralPath $product) {
+        try {
+            $head = [IO.File]::ReadAllText($product)
+            if ($head.Length -gt 4000) { $head = $head.Substring(0, 4000) }
+            if ($head -match '(?i)workbuddy') { return $true }
+        } catch { }
+    }
+    return $false
+}
+
 function Get-TargetId([string]$installPath, [string]$exeName) {
     $leaf = if ($installPath) { Split-Path -Leaf $installPath } else { "" }
     if (-not $leaf -and $exeName) { $leaf = [IO.Path]::GetFileNameWithoutExtension($exeName) }
@@ -88,6 +105,9 @@ function Get-InstallCandidates {
     #   2) App Paths：安装器登记的可执行文件路径
     #   3) 正在运行的进程：exe 实际所在目录
     # 每一路都只是线索，最后统一用 Test-TargetInstallRoot 验证（resources\app.asar* 或 WorkBuddy*.exe）。
+
+    # 0) 显式线索：WORKBUDDY_INSTALL（与 _install.py 的 _pins() 同源）
+    if ($env:WORKBUDDY_INSTALL) { & $add (Expand-TargetToken $env:WORKBUDDY_INSTALL) }
 
     # 1) App Paths —— 遍历整棵子树，只按 exe 名通配，不写死 WorkBuddy.exe / WorkBuddyAI.exe
     foreach ($base in @(
@@ -170,25 +190,40 @@ function Get-InstallCandidates {
         }
     } catch { }
 
-    # 5) 有界扫描 —— 绿色版/便携版/拷贝版没有注册表项，只能在常见位置找名字像 WorkBuddy 的目录
-    foreach ($letter in @("C", "D", "E", "F", "G", "H")) {
+    # 5) 兜底扫描 —— 绿色版/便携版/拷贝版没有注册表项。来源与 _install.install_roots_deep()
+    #    对齐：盘根、Program Files / Program Files (x86) / Apps / Programs / Software、
+    #    %LocalAppData%\Programs（含其它用户的同名目录）。只收"看着像 WorkBuddy"的目录，
+    #    结果与前面几路合并去重（最后统一走 Test-TargetInstallRoot）。
+    $scanBases = New-Object System.Collections.Generic.List[string]
+    $localPrograms = Join-Path $env:LOCALAPPDATA "Programs"
+    if ($env:LOCALAPPDATA -and (Test-Path -LiteralPath $localPrograms)) { $scanBases.Add($localPrograms) }
+    foreach ($letter in @("C", "D", "E", "F", "G", "H", "I", "J", "K")) {
         $drive = "${letter}:\"
         if (-not (Test-Path -LiteralPath $drive)) { continue }
-        $bases = @("Program Files", "Program Files (x86)", "Apps", "Programs", "Software") |
-            ForEach-Object { Join-Path $drive $_ }
+        foreach ($sub in @("Program Files", "Program Files (x86)", "Apps", "Programs", "Software")) {
+            $scanBases.Add((Join-Path $drive $sub))
+        }
         $users = Join-Path $drive "Users"
         if (Test-Path -LiteralPath $users) {
             Get-ChildItem -LiteralPath $users -Directory -ErrorAction SilentlyContinue |
                 Select-Object -First 20 | ForEach-Object {
-                    $bases += (Join-Path $_.FullName "AppData\Local\Programs")
+                    $scanBases.Add((Join-Path $_.FullName "AppData\Local\Programs"))
                 }
         }
-        foreach ($b in $bases) {
-            if (-not (Test-Path -LiteralPath $b)) { continue }
-            Get-ChildItem -LiteralPath $b -Directory -Recurse -Depth 1 -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like "*WorkBuddy*" -or (Test-Path -Path (Join-Path $_.FullName "WorkBuddy*.exe")) } |
-                ForEach-Object { & $add $_.FullName }
-        }
+    }
+    foreach ($b in $scanBases) {
+        if (-not (Test-Path -LiteralPath $b)) { continue }
+        Get-ChildItem -LiteralPath $b -Directory -Recurse -Depth 1 -ErrorAction SilentlyContinue |
+            Where-Object { Test-LooksLikeWorkBuddy $_.FullName } |
+            ForEach-Object { & $add $_.FullName }
+    }
+    # 盘根本身：便携版可能直接放在 <盘>:\WorkBuddy（只扫一层，且只认名字像 WorkBuddy 的目录）
+    foreach ($letter in @("C", "D", "E", "F", "G", "H", "I", "J", "K")) {
+        $drive = "${letter}:\"
+        if (-not (Test-Path -LiteralPath $drive)) { continue }
+        Get-ChildItem -LiteralPath $drive -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "*WorkBuddy*" } |
+            ForEach-Object { & $add $_.FullName }
     }
 
     $seen = @{}
@@ -203,6 +238,22 @@ function Get-InstallCandidates {
             $result += [pscustomobject]@{ InstallPath = $full; ExeName = $exe }
         }
     }
+
+    # 合并去重：安装目录的子目录（resources\、share-target\ 里也有 WorkBuddy*.exe）
+    # 不是独立安装。只保留"父目录不是另一个候选"的那些根。
+    $roots = @($result | ForEach-Object { $_.InstallPath.TrimEnd('\').ToLowerInvariant() })
+    $result = @($result | Where-Object {
+            $p = $_.InstallPath.TrimEnd('\').ToLowerInvariant()
+            -not ($roots | Where-Object { $_ -ne $p -and $p.StartsWith($_ + '\') })
+        })
+
+    # 真安装根优先：同一路径只保留一条（exe 名取根目录下的 WorkBuddy*.exe）
+    $byPath = @{}
+    foreach ($r in $result) {
+        $k = $r.InstallPath.TrimEnd('\').ToLowerInvariant()
+        if (-not $byPath.ContainsKey($k)) { $byPath[$k] = $r }
+    }
+    $result = @($byPath.Values | Sort-Object InstallPath)
     $script:InstallCandidatesCache = $result
     return $result
 }
@@ -268,6 +319,33 @@ function Get-DefaultConfigDir {
     return ""
 }
 
+# 已存在、但 .skill-list-cache.json 还没写过的数据目录：按"唯一一个像数据目录的 .workbuddy*"配对。
+# 新电脑上客户端刚启动、还没进过任何模式时缓存就是这样（有 sessions/traces/settings.json，
+# 但没有 .skill-list-cache.json），不配对就会退回不存在的 .<id>，部署写到空气里。
+#
+# 只在"本机确实只有这一套安装"时配对：多套安装时无法判断这个数据目录属于哪一套，
+# 套给每一套会把缓存写到别的产品的数据目录里（正是"多安装互相污染"的成因）。
+function Get-LooseConfigDir([string]$InstallPath = "") {
+    if ([string]::IsNullOrWhiteSpace($InstallPath)) { return "" }
+    $installs = @(Get-InstallCandidates)
+    if ($installs.Count -ne 1) { return "" }
+    if ($installs[0].InstallPath.TrimEnd('\') -ine $InstallPath.TrimEnd('\')) { return "" }
+    $cands = @()
+    foreach ($dir in @(Get-DataDirCandidates)) {
+        if (Test-ClientDataDir $dir) { $cands += $dir }
+    }
+    if ($cands.Count -eq 1) { return $cands[0] }
+    return ""
+}
+
+function Test-ClientDataDir([string]$path) {
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) { return $false }
+    foreach ($rel in @("plugins", "sessions", "traces", "settings.json")) {
+        if (Test-Path -LiteralPath (Join-Path $path $rel)) { return $true }
+    }
+    return $false
+}
+
 function Get-DiscoveredTargets {
     if ($null -ne $script:DiscoveredTargetsCache) { return $script:DiscoveredTargetsCache }
     $installs = @(Get-InstallCandidates)
@@ -293,6 +371,10 @@ function Get-DiscoveredTargets {
         if (@($result | Where-Object { $_.InstallPath -eq $i.InstallPath }).Count -gt 0) { continue }
         $id = Get-TargetId $i.InstallPath $i.ExeName
         $guess = Get-DefaultConfigDir -InstallPath $i.InstallPath -Id $id
+        if (-not (Test-ClientDataDir $guess)) {
+            $loose = Get-LooseConfigDir $i.InstallPath
+            if ($loose) { $guess = $loose }
+        }
         $result += [pscustomobject]@{
             Id = $id
             Label = (Split-Path -Leaf $i.InstallPath)
@@ -376,6 +458,11 @@ function Resolve-TargetProfile {
                  else { "" }
     if (-not $configDir) {
         $configDir = Get-DefaultConfigDir -InstallPath $install -Id $name2
+    }
+    if (-not (Test-ClientDataDir $configDir)) {
+        # 反查/推导出来的目录不存在时，退回"唯一一个像数据目录的 .workbuddy*"
+        $loose = Get-LooseConfigDir $install
+        if ($loose) { $configDir = $loose }
     }
     if (-not $configDir) {
         throw "Cannot determine the data directory for target '$name2'. Pass -ConfigDir explicitly."
