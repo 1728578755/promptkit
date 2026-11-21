@@ -2,6 +2,49 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.0 — 2026-11-21
+
+主题：**一键"关闭 → 注入 → 重启"，且打完必复核；`user-context` 的"只发一次"真正落盘。**
+
+### 一键部署不再要求你先关应用
+
+- `deploy.cmd` / `deploy.ps1` 默认自动：识别谁占着 `app.asar` 与 exe（按**可执行文件全路径**匹配进程）
+  → 请它自己关（8 s）→ 仍在则强杀它自己的进程树（15 s）→ 等文件解锁（40 s）→ 写入 → 再启动。
+- **只按 pid 杀**（`taskkill /PID … /T`），删除了一切 `/IM` 用法：按映像名批量杀会连带杀掉同名副本
+  或另一个安装——2026-11-21 用替身 exe 做测试时正是这样误杀了真实进程，这条写进了代码注释与回归断言。
+- 关过就一定开回来：关进程后注册退出钩子，写入失败 / 校验失败 / 异常退出都会重启。
+- 打完立刻用 `--status` 收口：任一补丁不是 `patched`、`integ` 或 `exe sync` 不是 `MATCH`，
+  本次部署记 `FAIL` 并整体 `exit 1`——不再出现"看起来成功、其实没打上"。
+- `-NoRestart`（旧参数 `-NoRelaunch`）退回手工模式：应用在跑时直接 `FAIL`，绝不静默跳过。
+
+### `user-context` 判据落盘（第 8 个 asar 补丁）
+
+- 新增补丁 `user-context-durable`：`composeUserPrompt` 里同步读写 `<数据目录>\uc-seen\<sessionId>`，
+  与 renderer 传来的标志取或；项目/Teams 分支的 `connector-status` 也纳入同一判据。
+- 为什么必须换地方：v1.1.x 的 `user-context-once` 把判据写进 renderer 的 `localStorage`，
+  而该 bundle 里**根本没有 localStorage**（自带的 8 处用法全被 `typeof localStorage<'u'` 或 try/catch
+  保护），`self.localStorage?.` 静默 no-op → `alreadyInjectedUserContext` 实测 **53/53 全 false**
+  （11/18–11/21 主进程日志）。旧补丁保留但标注为占位，真正生效的是新补丁。
+- `uc-seen.py --seed`：给"补丁上线前就存在、且已有 transcript"的会话补标记，
+  补完**立即生效**（每次 compose 都读盘，不用重启）；读不到 `"role":"user"` 的空草稿会跳过。
+- `deploy.ps1` 在 asar 补丁之后自动执行 seed。
+- 语义边界：`/clear` 走 `isClearSession===!0` 提前 return，标记不会被清 → 同一 sessionId 清空对话后
+  不再重注；桌面端「新对话」是新 sessionId，不受影响。要清用 `uc-seen.py --clear <sid>`。
+
+### 发布门槛补一条硬断言
+
+- `release-audit.js` 新增「全覆盖」：**源 `scripts/` 下每个文件都必须在 manifest 里**，
+  漏一个就 `exit 1`。这条把"新写了脚本但忘了进包"从人肉检查变成机器门槛（本次先证它会红，
+  抓到 `test-asar-restart.py` 漏登记，再补清单转绿）。
+
+### 新增文件
+
+| 文件 | 用途 |
+|---|---|
+| `scripts/uc-seen.py` | `user-context-durable` 标记管理：`--count` / `--seed` / `--clear` / `--prune` |
+| `scripts/trace-turns.py` | 按轮读 trace 请求体，判断某块是首轮一次还是每轮都有（附实测：trace 只落每个会话的首个请求） |
+| `scripts/test-asar-restart.py` | 断言关进程链路：全路径匹配、只发 `/PID`、同名副本不误杀，16 项 |
+
 ## v1.2.0 — 2026-11-21
 
 主题：**补齐运行层改造——公开版不再"少很多内容"。**

@@ -53,6 +53,23 @@ for (const [group, files] of Object.entries(REQUIRED)) {
   else ok(`完整性/${group}：${files.length} 个齐全`);
 }
 
+// ---------- 1b. 全覆盖：源 scripts/ 里每个文件都必须被清单点到 ----------
+// 光"清单里的文件都在包里"不够——新写的脚本忘了加清单，包就少一件能力。
+// 这条把「清单是源目录的超集」变成硬断言，正是"有的功能没加"的防线。
+if (SRC) {
+  const listed = new Set([
+    ...Object.values(REQUIRED).flat(),
+    ...SYNC_FILES,
+    ...SCRIPT_DIFF_ALLOWED,
+  ]);
+  const srcScripts = walk(path.join(SRC, "scripts"))
+    .map((p) => path.relative(SRC, p).split(path.sep).join("/"))
+    .filter((rel) => !rel.includes("__pycache__") && !rel.endsWith(".pyc"));
+  const orphans = srcScripts.filter((rel) => !listed.has(rel));
+  if (orphans.length) bad(`全覆盖：源 scripts/ 里有 ${orphans.length} 个文件没进清单 → ${orphans.join(", ")}`);
+  else ok(`全覆盖：源 scripts/ 的 ${srcScripts.length} 个文件都进了清单`);
+}
+
 // ---------- 2. 一致性 ----------
 if (!SRC) {
   ok("一致性：当前是独立包（没有上层源目录），跳过逐字节比较");

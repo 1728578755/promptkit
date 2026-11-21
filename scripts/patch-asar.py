@@ -285,6 +285,62 @@ def _pairs_user_context_once(data):
     return out
 
 
+# ---- user-context 判据落盘（2026-11-21）------------------------------------
+# 为什么再加一条：`user-context-once` 把判据写进 renderer 的 localStorage，
+# 实测**从未生效**——那个 bundle 里 localStorage 并不存在（自带的 8 处用法全被
+# `typeof localStorage<'u'` 或 try/catch 保护），`self.localStorage?.` 静默 no-op，
+# 于是 alreadyInjectedUserContext 在真实请求里 53/53 全是 false（11/18–11/21 日志，
+# `compose project context` 行）。真正挡住重复注入的只有内存判据
+# `hasPriorUserMessages`，它在 CLI 运行时被重建时会翻回 false（11/18 21:38
+# 同一 pid 的 c321390f / ed8f24b4 / 6bc1b8d4 都出现了 true→false）。
+#
+# 这条补丁把判据放到**主进程 + 磁盘**：composeUserPrompt 里同步读写
+# `<configDir>/uc-seen/<sessionId>`，与原标志取或（r=r||…），
+# 跨进程、跨工作区、跨重启都成立。util 是 h.a()（runtime-context2 的
+# getWorkbuddyRuntimeConfigDir），fs 已在本文件顶部绑成 O。
+#
+# 已知取舍：/clear 走 `isClearSession===!0` 提前 return，标记不会被清，
+# 所以同一 sessionId 清空对话后不再重注一次；桌面端「新对话」是新 sessionId，
+# 不受影响。要清就删 `~/.workbuddy/uc-seen/<sessionId>`（见 scripts/uc-seen.py）。
+UC_SEEN_ANCHOR = b"this.logger.info(`[WorkbuddyUserPromptService] compose project context "
+UC_SEEN_TAIL = b"isAskLike:isAskLikeMode(n,e.desiredConfig)});"
+CSTAT_PROJ_OLD = b"i=renderConnectorStatusBlock(o);i.length>0&&"
+CSTAT_PROJ_NEW = b"i=r?0:renderConnectorStatusBlock(o);i[0]  &&"
+
+
+def _pairs_user_context_durable(data):
+    """在 composeUserPrompt 里插入磁盘标记：读 → 取或给 r → 写。"""
+    pairs = []
+    i = data.find(UC_SEEN_ANCHOR)
+    if i >= 0:
+        j = data.find(b"logMemoryIndexComposeGate({", i)
+        if j < 0:
+            raise ValueError("uc-durable：找不到 logMemoryIndexComposeGate 调用")
+        end = data.find(UC_SEEN_TAIL, j)
+        if end < 0:
+            raise ValueError("uc-durable：gate 调用尾部锚点缺失")
+        end += len(UC_SEEN_TAIL)
+        old = bytes(data[i:end])
+        new = (
+            b"try{let ucd=h.a()+`/uc-seen/`;O.mkdirSync(ucd,{recursive:!0}),"
+            b"r=r||O.existsSync(ucd+e.sessionId),O.writeFileSync(ucd+e.sessionId,`1`)}catch{};"
+            b"this.logger.info(`[WorkbuddyUserPromptService] compose project context "
+            b"${JSON.stringify({sessionId:e.sessionId,alreadyInjectedUserContext:r})}`);"
+            b"this.logMemoryIndexComposeGate({sessionId:e.sessionId,"
+            b"hasPriorUserMessages:e.hasPriorUserMessages===!0,alreadyInjectedUserContext:r,"
+            b"isAskLike:isAskLikeMode(n,e.desiredConfig)});"
+        )
+        if len(new) > len(old):
+            raise ValueError("uc-durable 预算不够：%d > %d" % (len(new), len(old)))
+        pairs.append((old, new + b" " * (len(old) - len(new))))
+    n = data.count(CSTAT_PROJ_OLD)
+    if n == 1:
+        pairs.append((CSTAT_PROJ_OLD, CSTAT_PROJ_NEW))
+    elif data.count(CSTAT_PROJ_NEW) != 1:
+        raise ValueError("uc-durable：项目分支 connector-status 锚点命中 %d 次" % n)
+    return pairs
+
+
 # 文本补丁注册表：每条都是**等长**替换，可独立回滚
 PATCHES = [
     {
@@ -330,6 +386,13 @@ PATCHES = [
         "applied": lambda d: (b"self.localStorage?.getItem(a)" in d
                               and b"self.localStorage?.setItem(a,`1`" in d
                               and b"x=r?0:renderConnectorStatusBlock(o)" in d),
+    },
+    {
+        "name": "user-context-durable",
+        "title": "user-context 判据落盘：composeUserPrompt 读写 <configDir>/uc-seen/<sessionId>，项目分支的 connector-status 也守同一判据",
+        "fn": _pairs_user_context_durable,
+        "applied": lambda d: (b"/uc-seen/" in d
+                              and b"i=r?0:renderConnectorStatusBlock(o);i[0]  &&" in d),
     },
 ]
 
@@ -551,6 +614,218 @@ def exe_write_blocked(exe_path):
         return True
 
 
+def file_locked(path):
+    """能不能写这个文件（asar 也是被镜像映射的，运行中写不进去）。"""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r+b") as f:
+            f.seek(0)
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return True
+
+
+def _iter_processes():
+    """产出 (pid, exe_path|None)。用 Toolhelp32 + QueryFullProcessImageNameW。
+
+    为什么不调 wmic：Win11 已逐步移除，而且这类守护/安全策略常把它拉黑；
+    tasklist 拿不到全路径，只能按名字杀（会误杀别处的同名副本）。纯 ctypes 不依赖外部程序。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == INVALID_HANDLE_VALUE:
+        return []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            pid = int(entry.th32ProcessID)
+            path = None
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if h:
+                try:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    size = wintypes.DWORD(1024)
+                    if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                        path = buf.value
+                finally:
+                    kernel32.CloseHandle(h)
+            yield pid, entry.szExeFile, path
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+
+
+def find_app_processes(exe_path):
+    """返回该 exe 的 pid 列表。优先按**可执行文件全路径**比对；拿不到路径时才退回按名字，
+    并把"未能核验路径"的情况打印出来（非管理员跑时会发生）。"""
+    if os.name != "nt" or not os.path.isfile(exe_path):
+        return []
+    name = os.path.basename(exe_path)
+    target = os.path.normcase(os.path.abspath(exe_path))
+    by_path, by_name = [], []
+    for pid, pname, path in _iter_processes():
+        if path:
+            if os.path.normcase(path) == target:
+                by_path.append(pid)
+        elif pname and pname.lower() == name.lower():
+            # 路径读不到：按名字粗匹配，交给上层提示
+            by_name.append(pid)
+    if by_path:
+        return sorted(set(by_path))
+    if by_name:
+        print("  注：读不到进程全路径（未提权？），按映像名匹配 %s：%s"
+              % (name, ", ".join(str(p) for p in sorted(set(by_name)))))
+        return sorted(set(by_name))
+    return []
+
+
+def wait_unlocked(path, timeout=40.0, step=0.4):
+    """等到能写这个文件。运行中的 Electron 会整份映射 asar 与 exe，只能关闭后释放。"""
+    if not os.path.isfile(path):
+        return True
+    end = time.time() + timeout
+    while True:
+        if not file_locked(path):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(step)
+
+
+def close_app(exe_path, grace=8.0, hard=15.0):
+    """只结束 find_app_processes 认定的那些 pid。
+
+    **绝不用 taskkill /IM（按映像名批量杀）**：同名副本、别的安装、正在跑的另一个版本
+    会一起被杀——2026-11-21 用替身 exe 做测试时就这么把真实 WorkBuddy 杀了。
+    pid 来自全路径匹配，加上 /T 只连带它自己的子进程。
+    """
+    import subprocess
+    pids = find_app_processes(exe_path)
+    if not pids:
+        return []
+    name = os.path.basename(exe_path)
+    print("关闭 %s（%d 个进程：%s）…" % (name, len(pids), ", ".join(str(p) for p in pids)))
+
+    def kill(plist, force):
+        args = ["taskkill"]
+        if force:
+            args.append("/F")
+        args.append("/T")
+        for p in plist:
+            args += ["/PID", str(p)]
+        try:
+            subprocess.run(args, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        except Exception:
+            pass
+
+    kill(pids, False)  # 先请它自己关（GUI 应用会收到 WM_CLOSE）
+    end = time.time() + grace
+    while time.time() < end and find_app_processes(exe_path):
+        time.sleep(0.4)
+    left = find_app_processes(exe_path)
+    if left:
+        print("  还有 %d 个没退出，强制结束" % len(left))
+        kill(left, True)
+        end = time.time() + hard
+        while time.time() < end and find_app_processes(exe_path):
+            time.sleep(0.4)
+    return pids
+
+
+def launch_app(exe_path, extra_args=None):
+    """脱离本进程启动应用（本进程可能是提权的 cmd，不能让它拖着应用）。"""
+    import subprocess
+    flags = 0
+    if os.name == "nt":
+        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen([exe_path] + list(extra_args or []), cwd=os.path.dirname(os.path.abspath(exe_path)),
+                     close_fds=True, creationflags=flags)
+
+
+_RESTART = {"exe": None, "closed": []}
+
+
+def prepare_write(asar, exe, restart, dry_run=False):
+    """写之前确保 asar/exe 可写。restart=True 时：关进程 → 等解锁。"""
+    blocked = []
+    if file_locked(asar):
+        blocked.append(asar)
+    if exe and exe_write_blocked(exe):
+        blocked.append(exe)
+    if not blocked:
+        return True
+    if not restart:
+        return False
+    app_exe = exe if (exe and os.path.isfile(exe)) else default_exe_for(asar)
+    pids = find_app_processes(app_exe)
+    if dry_run:
+        print("[dry-run] 占用：%s" % ", ".join(os.path.basename(p) for p in blocked))
+        print("[dry-run] 会先关闭 %s（%d 个进程：%s），注入完成后重新启动"
+              % (os.path.basename(app_exe), len(pids), ", ".join(str(p) for p in pids) or "无"))
+        return True
+    if not pids:
+        print("!! 文件被占用，但没找到 %s 进程（可能是别的进程或安全软件持有）" % os.path.basename(app_exe))
+        return False
+    _RESTART["exe"] = app_exe
+    _RESTART["closed"] = close_app(app_exe)
+    # 不管后面从哪条路径退出（写入失败、校验失败、异常），进程结束时一定把它开回来
+    import atexit
+    atexit.register(relaunch_if_closed)
+    ok = wait_unlocked(asar)
+    if exe:
+        ok = wait_unlocked(exe) and ok
+    if not ok:
+        print("!! 关闭后 40 秒仍写不进去（文件仍被占用）")
+    return ok
+
+
+def relaunch_if_closed():
+    """只要前面真的关过，就一定把它开回来——失败也不例外。"""
+    exe = _RESTART.get("exe")
+    if not exe or not _RESTART.get("closed"):
+        return
+    try:
+        launch_app(exe)
+        print("已重新启动：%s" % exe)
+    except Exception as e:
+        print("!! 重新启动失败：%s" % e)
+        print("   请手动打开 %s" % exe)
+    finally:
+        _RESTART["closed"] = []
+
+
 def exe_manifest_hashes(exe_path):
     with open(exe_path, "rb") as f:
         blob = f.read()
@@ -712,6 +987,8 @@ def main():
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-node-check", action="store_true")
+    ap.add_argument("--restart", action="store_true",
+                    help="写不进去时自动关闭 WorkBuddy → 注入 → 再启动（deploy.cmd 默认开启）")
     args = ap.parse_args()
 
     asar = os.path.abspath(args.asar) if args.asar else ""
@@ -830,9 +1107,9 @@ def main():
             print("已经是原始状态，无需还原")
             return 0
 
-        if exe_edits and exe_path and exe_write_blocked(exe_path):
+        if exe_edits and exe_path and not prepare_write(asar, exe_path, args.restart):
             print("!! WorkBuddy 正在运行，无法写 WorkBuddy.exe；还原未执行（asar 未改）。")
-            print("   关闭 WorkBuddy 后重跑 scripts\\restore-asar.cmd")
+            print("   加 --restart 可自动「关闭 → 还原 → 再启动」，或关掉 WorkBuddy 重跑。")
             return 4
 
         try:
@@ -843,6 +1120,8 @@ def main():
         except PermissionError as e:
             print("写入被拒绝（需要管理员）: %s" % e)
             return 3
+        finally:
+            relaunch_if_closed()
         if asar_edits and not read_back(asar, asar_edits):
             print("!! asar 回读不一致")
             return 1
@@ -896,15 +1175,17 @@ def main():
             return 0
         old_vals = exe_manifest_hashes(exe)
         exe_sha_before = sha256_file(exe)
-        if exe_write_blocked(exe):
+        if not prepare_write(asar, exe, args.restart, args.dry_run):
             print("!! WorkBuddy.exe 写不进去（通常因为 WorkBuddy 正在运行，exe 被镜像锁定）。")
-            print("   请关闭 WorkBuddy 后运行 scripts\\apply-asar.cmd")
+            print("   deploy.cmd 会自动「关闭 → 注入 → 重启」；单独跑请加 --restart")
             return 4
         try:
             write_edits(exe, exe_edits)
         except PermissionError as e:
             print("写入被拒绝（需要管理员）: %s" % e)
             return 3
+        finally:
+            relaunch_if_closed()
         if not read_back(exe, exe_edits):
             write_edits(exe, [(o, n, o) for o, o, n in exe_edits])
             print("!! exe 回读不一致，已回滚")
@@ -993,13 +1274,14 @@ def main():
         print("exe:       跳过（--no-exe）—— 应用启动会被整头校验拦住")
 
     if args.dry_run:
+        prepare_write(asar, exe, True, True)  # 只打印「会关哪些进程、会重开谁」
         print("[dry-run] 不写文件")
         return 0
 
-    if exe and exe_edits and exe_write_blocked(exe):
-        print("!! WorkBuddy.exe 写不进去（通常因为 WorkBuddy 正在运行，exe 被镜像锁定）。")
-        print("   本次未写入任何改动（asar 也未改）。请关闭 WorkBuddy 后运行：")
-        print("   scripts\\apply-asar.cmd   （会提权、打补丁、再把 WorkBuddy 启动起来）")
+    if not prepare_write(asar, exe, args.restart):
+        print("!! WorkBuddy.exe / app.asar 写不进去（WorkBuddy 正在运行，文件被镜像锁定）。")
+        print("   本次未写入任何改动（asar 也未改）。deploy.cmd 会自动「关闭 → 注入 → 重启」；")
+        print("   单独跑请加 --restart。")
         return 4
 
     d = backup_dir(asar)

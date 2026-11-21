@@ -16,6 +16,7 @@ param(
     [switch]$SkipVerify,
     [switch]$Detailed,
     [switch]$NoRelaunch,
+    [switch]$NoRestart,
 
     # --- deploy options (forwarded to apply.ps1) ---
     [switch]$All,
@@ -91,6 +92,9 @@ elseif ($Asar) { $action = "asar" }
 elseif ($Restore) { $action = "restore" }
 elseif ($Verify) { $action = "verify" }
 elseif ($Pull) { $action = "pull" }
+
+# 一键「关闭 → 注入 → 重启」：默认开启。-NoRestart / -NoRelaunch 任一都退回旧行为（要求先手动关闭应用）。
+$autoRestart = (-not $NoRestart) -and (-not $NoRelaunch)
 
 # --- elevation: ask once, then every target is written from the same elevated run ---
 $needsAdmin = ((($action -eq "asar") -or ($action -eq "asar-restore")) -and (-not $DryRun))
@@ -219,8 +223,10 @@ function Invoke-AsarPatch($profile, $result) {
     $prevIo = $env:PYTHONIOENCODING
     $env:PYTHONIOENCODING = "utf-8"
     $asarOut = @()
+    $asarArgs = @("-X", "utf8", $script, "--apply", "--asar", $asar)
+    if ($autoRestart) { $asarArgs += "--restart" }
     try {
-        $asarOut = @(& $py -X utf8 $script --apply --asar $asar 2>&1 | ForEach-Object { [string]$_ })
+        $asarOut = @(& $py @asarArgs 2>&1 | ForEach-Object { [string]$_ })
         $asarCode = $LASTEXITCODE
     } finally {
         if ($null -eq $prevIo) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prevIo }
@@ -230,16 +236,67 @@ function Invoke-AsarPatch($profile, $result) {
     switch ($asarCode) {
         0 {
             if ($asarText -match 'already patched') { Add-Note $result "app.asar already patched" }
+            elseif ($asarText -match '(?m)^已重新启动') { Add-Note $result "app.asar patched (auto close -> patch -> relaunch)" }
             else { Add-Note $result "app.asar patched" }
         }
-        2 { Add-Note $result "app.asar anchors not found - skipped" }
-        3 { Add-Note $result "app.asar needs -Elevate" }
-        4 { Add-Note $result "app.asar skipped (app running)" }
+        2 {
+            Add-Note $result "app.asar anchors not found - this build changed; nothing written"
+            $result.Status = "FAIL"
+        }
+        3 { Add-Note $result "app.asar needs -Elevate"; $result.Status = "FAIL" }
+        4 {
+            Add-Note $result "app.asar NOT written (app running; rerun without -NoRestart)"
+            $result.Status = "FAIL"
+        }
         default {
             if ($isAdmin) { throw "patch-asar.py failed for $($profile.Name) (exit $asarCode)" }
             Add-Note $result "app.asar exit $asarCode"
+            $result.Status = "FAIL"
         }
     }
+
+    # 收口：打完再读一遍真实状态，任何一条没 patched / integrity 或 exe 清单对不上，都不许算成功
+    if ($asarCode -eq 0 -and -not $SkipAsarPatch) {
+        $stArgs = @("-X", "utf8", $script, "--status", "--asar", $asar)
+        $st = @(& $py @stArgs 2>&1 | ForEach-Object { [string]$_ })
+        $stBad = @($st | Where-Object {
+                $_ -match '^patch:\s+\S+\s+(raw|missing)\b' -or
+                $_ -match '^integ:\s+MISMATCH' -or
+                $_ -match '^exe sync:\s+MISMATCH' -or
+                $_ -match '^exe:\s+不存在'
+            })
+        if ($stBad.Count -gt 0) {
+            foreach ($b in $stBad) { Write-Host ("  " + $b) -ForegroundColor Red }
+            Add-Note $result "app.asar 未达预期（patched/integ/exe 见上）"
+            $result.Status = "FAIL"
+        } else {
+            $nPatched = @($st | Where-Object { $_ -match '^patch:\s+\S+\s+patched\b' }).Count
+            Add-Note $result ("app.asar verified: {0} patches + integrity + exe manifest" -f $nPatched)
+        }
+    }
+}
+
+function Invoke-UcSeenSeed($profile, $result) {
+    # user-context「只发一次」的磁盘标记：给补丁上线前就存在的会话补一次，
+    # 否则它们重启后第一条消息仍会被整段注入。补丁每次 compose 都读盘，补完立即生效。
+    if ($SkipAsarPatch -or $DryRun) { return }
+    $py = Get-PythonExe $profile.ConfigDir
+    $script = Join-Path $ScriptRoot "uc-seen.py"
+    if (-not $py -or -not (Test-Path -LiteralPath $script)) { return }
+    $seedArgs = @("-X", "utf8", $script, "--seed")
+    if ($profile.ConfigDir) { $seedArgs += @("--config-dir", $profile.ConfigDir) }
+    $prevIo = $env:PYTHONIOENCODING
+    $env:PYTHONIOENCODING = "utf-8"
+    $out = @()
+    try {
+        $out = @(& $py @seedArgs 2>&1 | ForEach-Object { [string]$_ })
+    } finally {
+        if ($null -eq $prevIo) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prevIo }
+    }
+    foreach ($line in $out) { Write-Host $line }
+    $summary = @($out | Where-Object { $_ -match '^seeded:' })
+    if ($summary.Count -gt 0) { Add-Note $result ("uc-seen " + $summary[0]) }
+    else { Add-Note $result "uc-seen seed skipped" }
 }
 
 function Invoke-DeployTarget($profile) {
@@ -273,6 +330,7 @@ function Invoke-DeployTarget($profile) {
 
     Invoke-ProductOverrides $profile $result
     Invoke-AsarPatch $profile $result
+    Invoke-UcSeenSeed $profile $result
 
     if (-not $DryRun -and -not $SkipVerify) {
         $verifyArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptRoot "verify.ps1"),
@@ -380,14 +438,19 @@ function Invoke-AsarTarget($profile, [string]$mode) {
     if ($mode -eq "apply" -and -not $DryRun) {
         $exe = if ($profile.ExeName) { [IO.Path]::GetFileNameWithoutExtension($profile.ExeName) } else { "WorkBuddy" }
         $running = @(Get-Process -Name $exe -ErrorAction SilentlyContinue)
-        if ($running.Count -gt 0) {
-            Add-Note $result ("app running ({0} processes) - close it first" -f $running.Count)
+        if ($running.Count -gt 0 -and -not $autoRestart) {
+            Add-Note $result ("app running ({0} processes); -NoRestart given, app.asar 未写入" -f $running.Count)
             $result.Status = "FAIL"
             return $result
         }
+        if ($running.Count -gt 0) {
+            Add-Note $result ("app running ({0} processes) -> close, patch, relaunch" -f $running.Count)
+        }
     }
 
-    $args = if ($DryRun) { @($script, "--dry-run", "--asar", $asar) } else { @($script, "--$mode", "--asar", $asar) }
+    $args = @($script, "--asar", $asar)
+    if ($DryRun) { $args += "--dry-run" } else { $args += "--$mode" }
+    if ($autoRestart -and -not $DryRun -and $mode -eq "apply") { $args += "--restart" }
     Invoke-Python $py $args
     $code = $LASTEXITCODE
     if ($code -eq 2) {
@@ -397,12 +460,12 @@ function Invoke-AsarTarget($profile, [string]$mode) {
     }
     if ($code -ne 0) {
         Add-Note $result "patch-asar.py exit $code"
-        $result.Status = if ($code -eq 4) { "SKIP" } else { "FAIL" }
+        $result.Status = "FAIL"
         return $result
     }
     $result.Status = "OK"
 
-    if ($mode -eq "apply" -and -not $DryRun -and -not $NoRelaunch) {
+    if ($mode -eq "apply" -and -not $DryRun -and -not $autoRestart -and -not $NoRelaunch) {
         $exePath = Join-Path $profile.InstallPath $profile.ExeName
         if (Test-Path -LiteralPath $exePath) {
             # 必须经资源管理器启动：直接 Start-Process 会继承提权令牌，应用会以管理员身份运行
