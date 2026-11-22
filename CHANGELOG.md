@@ -2,6 +2,42 @@
 
 本文件记录 PromptKit 公开版的内容变化。提示词是会被逐字节比较的资产，所以每个版本都写明"改了什么位置"，而不只写"优化了提示词"。
 
+## v1.3.19 — 2026-11-22
+
+主题：**部署链路健壮性二轮修复（A–G/P）+ 端到端回归套件（H）+ 行尾发布策略（F-12 闭合）**。
+全部验证走副本与伪造 `USERPROFILE` 的仿真环境与只读冒烟，未触碰任何真实安装。
+
+### 部署链路修复（对应 `DIAGNOSIS-2026-11-22-system-and-new-env.md`）
+- **A. `scripts/deploy.ps1`**：新增 `Invoke-NativeCapture`——PS 5.1 下 `$ErrorActionPreference="Stop"`
+  时原生命令 stderr 会变成 `RemoteException` 中止部署；现在原生调用统一捕获 stderr/exit code。
+- **B. `scripts/doctor.py`**：`decide()` 对 `roots==[]`（一台安装都没找到）判 **NOT EFFECTIVE**
+  并 exit 1，不再给出"看起来正常"的误导结论；`UNPROVEN` 只留给"有安装但还没有新请求可证明"。
+- **C. `scripts/apply.ps1`**：冷启动两级判定——插件缓存无版本目录且安装侧也无 builtin 版本时
+  FAIL 并提示先启动一次客户端；DryRun 不受影响；杜绝"只写了镜像却报成功"。
+- **D. `scripts/target.ps1`**：新增 `Get-DataFolderName`，数据目录名不再写死，
+  `.workbuddy`/`.workbuddy-ai` 及未来变体按安装身份推导。
+- **E. `scripts/patch-cli-trim.py`**：chunk 适配器锚点动态发现（版本升级换文件名/结构不再硬 FAIL），
+  `--self-test` 覆盖 outlet 传输层。
+- **P. `scripts/patch-asar.py`**：写 asar 失败时回滚原子化（先写临时文件再替换）；
+  winerror 5（拒绝访问）/32（文件占用）分开报——占用提示关掉客户端，权限提示用管理员。
+- **G. `scripts/wb-fix-lite.ps1`**：SCRUB 块提取独立成 `Read-ScrubBlock`（标记对校验 +
+  回退路径），零依赖兜底补丁的注入内容有完整性检查。
+
+### 回归与发布工程（H 组）
+- **H1. `_selftest/run-regression-20261122.ps1`**（新）：12 场景 (a)–(l) 端到端回归，
+  **57 项断言全 PASS**——覆盖 deploy 状态不被覆写、PS5.1 stderr、vendor python、
+  冷启动门禁、doctor 空 roots/截断 trace、scopeKey 反查、verify 无 trace、
+  patch-cli-trim 自测、patch-asar 回滚仿真、wb-fix-lite 空格路径、deploy.cmd 静态断言。
+- **H2. `release/.gitattributes` 重写**：从"一刀切 LF"改为**逐文件锁定行尾**——
+  基线 `* text=auto eol=lf`，工作区确为 CRLF 的脚本逐个锁 `eol=crlf`。
+  zip 解压后与工作区（人测过的那份）逐字节一致，不再有"发布漂移"。
+- **H3. `scripts/test-launch-coverage.ps1`**：新增"多安装全部关闭"场景
+  （两个 profile 都未运行 → 两个都拉起，A7 回归）；共 27 项断言。
+- **H4. `scripts/release-audit.js`**：新增 `--zip <path>`——直接审计一个已打好的 zip，
+  逐条目比对行尾与源工作区（56 个脚本条目）；发布前可对最终产物复验。
+- **行尾残留闭合**：`scripts/wb-fix-lite.cmd`（LF→CRLF）、`scripts/pull.ps1`
+  （MIXED→CRLF）——audit 0 WARN。
+
 ## v1.3.18 — 2026-11-21
 
 主题：**新环境（全新电脑/新安装）部署失败的九项根因修复（A–I）**。
