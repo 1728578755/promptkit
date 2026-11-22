@@ -26,6 +26,10 @@ const NESTED = path.join(HERE, "release");
 const PKG = fs.existsSync(path.join(NESTED, "scripts", "deploy.ps1")) ? NESTED : HERE;
 const SRC = PKG === HERE ? null : HERE; // 源目录（只有工作区模式才有）
 const jsonMode = process.argv.includes("--json");
+// 可选：--zip <path> 额外审计一个已经打好的 zip（git archive 产物）。
+// 缺省不审 zip——发布前的仓库审计不该依赖"zip 已经生成"。
+const zipArgIdx = process.argv.indexOf("--zip");
+const ZIP = zipArgIdx >= 0 ? path.resolve(process.argv[zipArgIdx + 1] || "") : "";
 
 const problems = [];
 const notes = [];
@@ -147,8 +151,118 @@ try {
   bad(`版本号：读不到元数据（${e.message}）`);
 }
 
+// ---------- 5. 行尾漂移 ----------
+// F-12：release/.gitattributes 曾只有 `* text=auto eol=lf`，于是 git archive 出来的
+// zip 里所有 .ps1 都是 LF，而工作区/人测过的是 CRLF。这里做两层校验：
+//   (a) release/ 工作区的行尾必须与源工作区逐文件一致（前提：sync-release 已跑过）；
+//   (b) 若给了 --zip，zip 内每个 scripts/*.{ps1,py,cmd,js} 的行尾也必须与源工作区一致。
+// 只比"行尾种类"（CRLF/LF/MIXED），不比字节——zip 与工作区可能仅因 CRLF 而不同。
+function eolOf(buf) {
+  let crlf = 0;
+  let lf = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] !== 0x0a) continue;
+    if (i > 0 && buf[i - 1] === 0x0d) crlf++;
+    else lf++;
+  }
+  if (crlf && lf) return "MIXED";
+  if (crlf) return "CRLF";
+  if (lf) return "LF";
+  return "NONE";
+}
+const eolFiles = new Set([...SYNC_FILES, ...Object.values(REQUIRED).flat()].filter((f) => /\.(ps1|py|cmd|js)$/.test(f)));
+// 源文件自身是 MIXED 是"源工作区的毛病"，不是打包漂移；单独报成 WARN 提示修源文件，
+// 否则这条检查会变成"永远红"，失去信号。只要 zip 与源一致就算打包正确。
+const srcMixed = [];
+if (SRC) {
+  const drift = [];
+  for (const rel of [...eolFiles].sort()) {
+    const a = at(SRC, rel);
+    const b = at(PKG, rel);
+    if (!fs.existsSync(a) || !fs.existsSync(b)) continue;
+    const ea = eolOf(fs.readFileSync(a));
+    const eb = eolOf(fs.readFileSync(b));
+    if (ea === "MIXED") srcMixed.push(rel);
+    if (ea !== eb) drift.push(`${rel} 源=${ea} 包=${eb}`);
+  }
+  if (drift.length) bad(`行尾/${PKG.split(path.sep).pop()}：${drift.length} 个文件与源工作区不一致 → ${drift.slice(0, 8).join(", ")}`);
+  else ok(`行尾：包内 ${eolFiles.size} 个脚本文件与源工作区一致`);
+  // cmd.exe 对 LF-only 的批处理会在 goto/if 块上解析异常，这一条是硬约束。
+  const lfCmd = [...eolFiles].filter((f) => f.endsWith(".cmd")).filter((f) => {
+    const a = at(SRC, f);
+    return fs.existsSync(a) && eolOf(fs.readFileSync(a)) !== "CRLF";
+  });
+  if (lfCmd.length) bad(`行尾：这些 .cmd 在源工作区不是 CRLF，cmd.exe 会解析异常 → ${lfCmd.join(", ")}`);
+  else ok("行尾：所有 .cmd 在源工作区都是 CRLF");
+}
+if (ZIP) {
+  let AdmZip = null;
+  try {
+    // Node 22+ 无内置 zip 读取；优先用已装的 node_modules，其次用系统 tar（不引入新依赖）。
+    AdmZip = require("adm-zip");
+  } catch {
+    AdmZip = null;
+  }
+  const zipEntries = new Map();
+  if (AdmZip) {
+    const zip = new AdmZip(ZIP);
+    for (const e of zip.getEntries()) {
+      if (!e.isDirectory && /\.(ps1|py|cmd|js)$/.test(e.entryName)) {
+        zipEntries.set(e.entryName, e.getData());
+      }
+    }
+  } else {
+    // 回退：用 PowerShell 的 System.IO.Compression 读出每个 entry 的行尾。
+    const { execFileSync } = require("child_process");
+    const ps = [
+      "Add-Type -AssemblyName System.IO.Compression.FileSystem;",
+      `$z=[IO.Compression.ZipFile]::OpenRead('${ZIP.replace(/'/g, "''")}');`,
+      "foreach($e in $z.Entries){ if($e.Name -and $e.FullName -match '\\.(ps1|py|cmd|js)$'){",
+      "$s=$e.Open();$m=New-Object IO.MemoryStream;$s.CopyTo($m);$b=$m.ToArray();$s.Close();",
+      "$c=0;$l=0;for($i=0;$i -lt $b.Length;$i++){if($b[$i] -eq 10){if($i -gt 0 -and $b[$i-1] -eq 13){$c++}else{$l++}}};",
+      // zip 条目名就是相对包根的路径（scripts/...），不要再剥一层目录。
+      "$k=$e.FullName;",
+      "'{0}|{1}|{2}' -f $k,$c,$l }}; $z.Dispose()",
+    ].join(" ");
+    const out = execFileSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8", timeout: 120000 });
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/^(.+)\|(\d+)\|(\d+)$/);
+      if (!m) continue;
+      const [, name, c, l] = m;
+      const kind = Number(c) && Number(l) ? "MIXED" : Number(c) ? "CRLF" : Number(l) ? "LF" : "NONE";
+      zipEntries.set(name, kind);
+    }
+  }
+  const base = SRC || PKG;
+  const zipDrift = [];
+  const zipNormalized = [];
+  let checkedZip = 0;
+  for (const [rel, data] of zipEntries) {
+    const a = at(base, rel);
+    if (!fs.existsSync(a)) continue;
+    const ez = typeof data === "string" ? data : eolOf(data);
+    const ea = eolOf(fs.readFileSync(a));
+    checkedZip++;
+    if (ez === ea) continue;
+    // 源文件本身"坏"（混合行尾，或 .cmd 不是 CRLF）时，zip 按 .gitattributes 归一成
+    // CRLF 是**更正确**的结果（cmd.exe 要求 CRLF）。这种差异记为源侧缺陷 WARN，
+    // 不冒充"打包漂移"——否则这条检查会对已知坏文件永远红，失去信号。
+    const srcBroken = ea === "MIXED" || (rel.endsWith(".cmd") && ea !== "CRLF");
+    if (srcBroken) zipNormalized.push(`${rel} 工作区=${ea} zip=${ez}（zip 归一为 CRLF，源文件需修）`);
+    else zipDrift.push(`${rel} 工作区=${ea} zip=${ez}`);
+  }
+  if (!zipEntries.size) bad(`行尾/zip：读不出任何脚本条目（${ZIP}）`);
+  else if (zipDrift.length) bad(`行尾/zip：${zipDrift.length}/${checkedZip} 个脚本与工作区不一致 → ${zipDrift.slice(0, 8).join(", ")}`);
+  else ok(`行尾/zip：${checkedZip} 个脚本条目与工作区一致`);
+  for (const w of zipNormalized) notes.push(`  WARN 行尾/zip：${w}`);
+}
+if (srcMixed.length) {
+  // 不是阻塞项：zip 已与源一致。但源文件本身混合行尾会让编辑器/补丁工具反复产生假差异。
+  notes.push(`  WARN 行尾：源工作区有 ${srcMixed.length} 个文件是混合行尾（建议统一）→ ${srcMixed.join(", ")}`);
+}
+
 // ---------- 输出 ----------
-const report = { package: PKG, source: SRC, mode: SRC ? "workspace" : "package", required: requiredCount, problems };
+const report = { package: PKG, source: SRC, mode: SRC ? "workspace" : "package", required: requiredCount, zip: ZIP || null, problems };
 if (jsonMode) {
   console.log(JSON.stringify(report, null, 2));
 } else {
