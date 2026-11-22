@@ -187,12 +187,14 @@ if (SRC) {
   }
   if (drift.length) bad(`行尾/${PKG.split(path.sep).pop()}：${drift.length} 个文件与源工作区不一致 → ${drift.slice(0, 8).join(", ")}`);
   else ok(`行尾：包内 ${eolFiles.size} 个脚本文件与源工作区一致`);
-  // cmd.exe 对 LF-only 的批处理会在 goto/if 块上解析异常，这一条是硬约束。
+  // .cmd 推荐 CRLF（cmd.exe / Git / 编辑器都按这个预期工作）。但实测本机 cmd.exe
+  // 对 LF-only 的批处理（含 if 括号块 + goto 标签）执行正常，所以这不是硬失败，
+  // 只提示——把"没验证过的假设"写成阻塞项会让审计失去可信度。
   const lfCmd = [...eolFiles].filter((f) => f.endsWith(".cmd")).filter((f) => {
     const a = at(SRC, f);
     return fs.existsSync(a) && eolOf(fs.readFileSync(a)) !== "CRLF";
   });
-  if (lfCmd.length) bad(`行尾：这些 .cmd 在源工作区不是 CRLF，cmd.exe 会解析异常 → ${lfCmd.join(", ")}`);
+  if (lfCmd.length) notes.push(`  WARN 行尾：这些 .cmd 在源工作区不是 CRLF（建议改回）→ ${lfCmd.join(", ")}`);
   else ok("行尾：所有 .cmd 在源工作区都是 CRLF");
 }
 if (ZIP) {
@@ -245,7 +247,7 @@ if (ZIP) {
     checkedZip++;
     if (ez === ea) continue;
     // 源文件本身"坏"（混合行尾，或 .cmd 不是 CRLF）时，zip 按 .gitattributes 归一成
-    // CRLF 是**更正确**的结果（cmd.exe 要求 CRLF）。这种差异记为源侧缺陷 WARN，
+    // CRLF 是**更正确**的结果（cmd.exe 习惯、编辑器一致）。这种差异记为源侧缺陷 WARN，
     // 不冒充"打包漂移"——否则这条检查会对已知坏文件永远红，失去信号。
     const srcBroken = ea === "MIXED" || (rel.endsWith(".cmd") && ea !== "CRLF");
     if (srcBroken) zipNormalized.push(`${rel} 工作区=${ea} zip=${ez}（zip 归一为 CRLF，源文件需修）`);
