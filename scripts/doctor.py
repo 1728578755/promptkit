@@ -17,7 +17,8 @@
 
 用法：
     python -X utf8 scripts/doctor.py
-    python -X utf8 scripts/doctor.py --json
+    python -X utf8 scripts/doctor.py --json                 # stdout 只有 JSON
+    python -X utf8 scripts/doctor.py --report-file out.txt  # 人类报告写到指定文件
     python -X utf8 scripts/doctor.py --install "D:\\Program Files\\WorkBuddy"
     python -X utf8 scripts/doctor.py --write-report
 """
@@ -127,6 +128,40 @@ def config_dirs():
     return out
 
 
+def _norm_path(p):
+    return os.path.normcase(os.path.abspath(p)).rstrip("\\/")
+
+
+# scopeKey 里记的是"技能来源"路径，真实形态例如
+#   D:\\Program Files\\WorkBuddyAI\\resources\\app.asar.unpacked\\resources\\plugins\\workbuddy-builtin\\skills
+# 也可能出现 node_modules 布局：
+#   <root>\\resources\\app.asar.unpacked\\node_modules\\@genie\\agent-harness\\cli
+RE_SCOPE_PLUGINS = re.compile(
+    r"^(.*?)[\\/]resources[\\/]app\.asar\.unpacked[\\/]resources[\\/]plugins(?:[\\/]|$)",
+    re.IGNORECASE)
+RE_SCOPE_HARNESS = re.compile(
+    r"^(.*?)[\\/]resources[\\/]app\.asar\.unpacked[\\/]node_modules[\\/]@genie[\\/]agent-harness(?:[\\/]|$)",
+    re.IGNORECASE)
+RE_SCOPE_UNPACKED = re.compile(
+    r"^(.*?)[\\/]resources[\\/]app\.asar(?:\.unpacked)?(?:[\\/]|$)", re.IGNORECASE)
+
+
+def _scope_keys(data):
+    """把 .skill-list-cache.json 的 scopeKey 摊平成字符串列表。
+
+    真实格式是"JSON 数组的字符串"（外层字符串里是 ["C:\\\\...","D:\\\\..."]），
+    直接对它做正则永远匹配不到，必须先 json.loads 一次。
+    """
+    keys = data.get("scopeKey") if isinstance(data, dict) else None
+    if isinstance(keys, str):
+        try:
+            parsed = json.loads(keys)
+        except Exception:
+            parsed = None
+        keys = parsed if isinstance(parsed, list) else [keys]
+    return [s for s in (keys or []) if isinstance(s, str)]
+
+
 def install_from_data_dir(cfg):
     """<数据目录>\\.skill-list-cache.json 的 scopeKey 反查安装目录（便携/未注册安装也能配对）。"""
     cache_file = os.path.join(cfg, ".skill-list-cache.json")
@@ -135,42 +170,70 @@ def install_from_data_dir(cfg):
             data = json.load(fh)
     except Exception:
         return ""
-    keys = data.get("scopeKey") if isinstance(data, dict) else None
-    if isinstance(keys, str):
-        # 实际格式是 JSON 数组的字符串（不是单个路径），先尝试解析，失败再当一条路径。
-        try:
-            parsed = json.loads(keys)
-            keys = parsed if isinstance(parsed, list) else [keys]
-        except Exception:
-            keys = [keys]
-    for s in keys or []:
-        if not isinstance(s, str):
+    for s in _scope_keys(data):
+        s = s.strip().strip('"')
+        if not s:
             continue
-        m = re.match(r"^(.*?)\\resources\\app\.asar\.unpacked", s)
-        if m:
-            return m.group(1)
+        for rx in (RE_SCOPE_PLUGINS, RE_SCOPE_HARNESS, RE_SCOPE_UNPACKED):
+            m = rx.match(s)
+            if m:
+                return m.group(1).rstrip("\\/").replace("/", os.sep)
     return ""
+
+
+PRODUCT_JSON_RELS = (
+    os.path.join("resources", "app.asar.unpacked", "cli", "product.json"),
+    os.path.join("resources", "app.asar.unpacked", "node_modules", "@genie",
+                 "agent-harness", "cli", "product.json"),
+)
+
+
+def product_info(install_root):
+    """读安装里的 cli/product.json（两种布局）。返回 (dataFolderName, endpoint)。
+
+    优先 <root>\\resources\\app.asar.unpacked\\cli\\product.json：它是产品自己的声明。
+    node_modules\\@genie\\agent-harness\\cli\\product.json 只用来补 dataFolderName——
+    那份的 endpoint 对所有产品都写 codebuddy.ai，拿它猜目录会把国际版/国内版猜反。
+    """
+    name, endpoint = "", ""
+    for i, rel in enumerate(PRODUCT_JSON_RELS):
+        try:
+            with open(os.path.join(install_root, rel), encoding="utf-8", errors="replace") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if not name:
+            name = (data.get("dataFolderName") or "").strip()
+        if i == 0 and not endpoint:
+            endpoint = (data.get("endpoint") or "").strip()
+    return name, endpoint
 
 
 # ------------------------------------------------------------------ layers
 def pair_config(install_root, cfgs):
-    """安装 -> 它使用的配置目录（CN 用 .workbuddy，国际版用 .workbuddy-ai）。"""
-    endpoint = ""
-    try:
-        pj = os.path.join(install_root, "resources", "app.asar.unpacked", "cli", "product.json")
-        with open(pj, encoding="utf-8", errors="replace") as fh:
-            endpoint = (json.load(fh).get("endpoint") or "").lower()
-    except Exception:
-        pass
-    want = ".workbuddy-ai" if "workbuddy.ai" in endpoint else ".workbuddy"
-    for c in cfgs:
-        if os.path.basename(c).lower() == want:
-            return c
-    # 名字对不上时按 scopeKey 反查：便携/改名安装的数据目录不叫 .workbuddy 也能配对
-    target = os.path.normcase(os.path.abspath(install_root).rstrip("\\"))
+    """安装 -> 它使用的配置目录（CN 用 .workbuddy，国际版用 .workbuddy-ai）。
+
+    顺序：scopeKey 反查（最可靠，便携/改名安装也能认）→ product.json 的
+    dataFolderName（产品自己的声明）→ endpoint 猜（最后兜底）。
+    """
+    target = _norm_path(install_root)
     for c in cfgs:
         paired = install_from_data_dir(c)
-        if paired and os.path.normcase(os.path.abspath(paired).rstrip("\\")) == target:
+        if paired and _norm_path(paired) == target:
+            return c
+    name, endpoint = product_info(install_root)
+    if name:
+        for c in cfgs:
+            if os.path.basename(c).lower() == name.lower():
+                return c
+        # 产品声明了数据目录但本机没有：说明这套从没冷启动过。
+        # 此时绝不能再拿 endpoint 猜一个别的目录顶替——那正是"用 A 的 trace 证明 B"的来源。
+        return ""
+    want = ".workbuddy-ai" if "workbuddy.ai" in endpoint.lower() else ".workbuddy"
+    for c in cfgs:
+        if os.path.basename(c).lower() == want:
             return c
     return ""
 
@@ -274,8 +337,34 @@ def cli_problems(state):
     return out
 
 
+def cli_missing_parts(state):
+    """v3 补丁缺了哪几块（用于把"残缺"写进结论，而不是一句笼统的 bad）。"""
+    missing = []
+    if not state["helper"]:
+        missing.append("helper")
+    else:
+        if not state["blank"]:
+            missing.append("blank")
+        if not state["drop"]:
+            missing.append("drop")
+    if not state["scrub"]:
+        missing.append("fetch-scrub")
+    if state["ins_raw"] or not state["ins_wrapped"]:
+        missing.append("instructions")
+    if state["in_raw"] or not state["in_wrapped"]:
+        missing.append("input")
+    return missing
+
+
 def layer_cli(root):
-    """返回 (rows, chunk_paths)。"""
+    """返回 (rows, chunk_paths)。
+
+    分级（B1）：
+      * v3 完整、无 bad                     -> PASS
+      * 有 __wbTrimLite、但没有 v3 helper    -> WARN（合法降级态，结论里按"轻量态"记）
+      * 有 __wbTrimLite、v3 helper 在位但缺块 -> FAIL（"v3 补丁残缺: 缺 X"）
+        —— 这种状态以前被降级成 WARN，[3.5] 判 PASS，把残缺安装报成 EFFECTIVE。
+    """
     unpacked, chunks = find_chunks(root)
     rows = []
     if not os.path.isdir(unpacked):
@@ -289,19 +378,43 @@ def layer_cli(root):
     for path in chunks:
         st = cli_state(path)
         bad = cli_problems(st)
-        # 只打了"轻量出口清理"时，模型边界仍然被清（WARN，不是 FAIL）：
-        # 这种构建是锚点对不上才退到轻量修法，不该让人以为完全没生效。
-        lite_only = bool(bad) and st["lite"]
-        state = PASS if not bad else (WARN if lite_only else FAIL)
+        lite = st["lite"]
+        # 轻量出口清理 + v3 helper 在位：只有"v3 完整"才算好；缺任何一块都是残缺。
+        lite_broken = bool(bad) and lite and st["helper"]
+        # 轻量出口清理但完全没有 v3：这是 wb-fix-lite 的合法降级态，仍是 WARN。
+        lite_no_v3 = bool(bad) and lite and not st["helper"]
+        lite_only = lite_broken or lite_no_v3
+        if not bad:
+            state = PASS
+        elif lite_broken:
+            state = FAIL
+        elif lite_no_v3:
+            state = WARN
+        else:
+            state = FAIL
+        missing = cli_missing_parts(st) if bad else []
+        if lite_broken:
+            note = "  ← v3 补丁残缺: 缺 " + ",".join(missing)
+        elif lite_no_v3:
+            note = "  ← 轻量态（只有出口清理，无 v3 helper），未完全生效"
+        elif bad:
+            note = "  ← " + ",".join(bad)
+        else:
+            note = ""
         rows.append({"where": os.path.basename(path),
                      "state": state,
                      "detail": "bytes=%d version=%d mtime=%s%s"
-                               % (st["bytes"], st["version"], ts(st["mtime"]),
-                                  "" if not bad else
-                                  ("  ← 仅轻量出口清理（" + ",".join(bad) + "）" if lite_only
-                                   else "  ← " + ",".join(bad))),
-                     "lite_only": lite_only})
-        sub_ok = lambda ok: PASS if ok else (WARN if lite_only else FAIL)
+                               % (st["bytes"], st["version"], ts(st["mtime"]), note),
+                     "lite_only": lite_only,
+                     "lite_broken": lite_broken,
+                     "lite_no_v3": lite_no_v3,
+                     "missing": missing})
+
+        def sub_ok(ok):
+            if ok:
+                return PASS
+            return FAIL if lite_broken else (WARN if lite_no_v3 else FAIL)
+
         rows.append({"where": "    instructions",
                      "state": sub_ok(st["ins_raw"] == 0 and st["ins_wrapped"]),
                      "detail": "wrapped=%d raw=%d (raw 必须 0)" % (st["ins_wrapped"], st["ins_raw"])})
@@ -491,13 +604,33 @@ def shutil_which(name):
     return None
 
 
-def newest_trace():
-    rows = []
-    for cfg in config_dirs():
-        for path in glob.glob(os.path.join(cfg, "traces", "*", "trace_*.jsonl")):
-            rows.append((os.path.getmtime(path), path))
-    rows.sort(reverse=True)
-    for mtime, path in rows[:40]:
+# WorkBuddy 的 span.toolInput 在约 20000 字符处被截断（本机所有 generation span 都是 20003）。
+# 到这个长度就说明"后面还有内容没扫到"，计数只能当下界用。
+TRACE_TRUNC_HINT = 20000
+
+
+def _count_mark(raw, needle):
+    """数 toolInput 里的标记次数。
+
+    toolInput 是 JSON 字符串，里面的引号被转义成 \\"，所以 'data-role="user-context"'
+    的直接 count 恒为 0。两种形态都要数，取较大值（同一条消息不会两边都算）。
+    """
+    n = raw.count(needle)
+    if '"' in needle:
+        n = max(n, raw.count(needle.replace('"', '\\"')))
+    return n
+
+
+def _trace_candidates(path, mtime):
+    """从一份 trace 里取 **最后一轮** generation span。
+
+    返回 (strict, loose)：
+      strict = 最后一轮带 <refusal_policy> 的 span（正常模式）
+      loose  = 最后一轮任一含 toolInput 的 generation span（B6 兜底）
+    同一份 trace 内也不再取第一条：会话是多轮的，要的是最后一轮的真实请求。
+    """
+    strict, loose = None, None
+    try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if "toolInput" not in line:
@@ -506,55 +639,128 @@ def newest_trace():
                     obj = json.loads(line)
                 except Exception:
                     continue
-                raw = (obj.get("span") or {}).get("toolInput")
-                if not isinstance(raw, str) or "<refusal_policy>" not in raw:
+                span = obj.get("span") or {}
+                raw = span.get("toolInput")
+                if not isinstance(raw, str) or not raw:
                     continue
-                try:
-                    msgs = json.loads(raw)
-                    count = len(msgs) if isinstance(msgs, list) else None
-                    trunc = False
-                except Exception:
-                    count, trunc = None, True
-                return {"path": path, "mtime": mtime, "raw": raw,
-                        "messages": count, "truncated": trunc,
-                        "marks": {m: raw.count(m) for m in MUST_ZERO + ALLOW_ONCE},
-                        "blocks": {t: raw.count("<" + t) for t in REMOVED_TAGS}}
+                if (span.get("name") or "").lower() != "generation":
+                    continue
+                if "<refusal_policy>" in raw:
+                    strict = raw
+                else:
+                    loose = raw
+    except OSError:
+        return None, None
+    return strict, loose
+
+
+def _make_trace(path, mtime, raw, note=""):
+    try:
+        msgs = json.loads(raw)
+        count = len(msgs) if isinstance(msgs, list) else None
+        trunc = False
+    except Exception:
+        count, trunc = None, True
+    if len(raw) >= TRACE_TRUNC_HINT:
+        trunc = True
+    return {"path": path, "mtime": mtime, "raw": raw,
+            "messages": count, "truncated": trunc, "note": note,
+            "marks": {m: _count_mark(raw, m) for m in MUST_ZERO + ALLOW_ONCE},
+            "blocks": {t: _count_mark(raw, "<" + t) for t in REMOVED_TAGS}}
+
+
+def newest_trace(cfg=None):
+    """某一份配置目录下最新的真实请求。cfg 为空时按全局（所有配置目录）找。
+
+    跨安装错配（B7）：调用方应对每个安装传它自己配对的 cfg；只有显式共用
+    一份配置目录时才该在一起比较。
+
+    B6：先按 mtime 从新到旧找"带 <refusal_policy>"的最后一轮；只有当所有候选
+    都没有该标签时，才退回最新的任一含 toolInput 的 generation span，并把
+    "无 refusal_policy"记进 detail——而不是整份 trace 被跳过、报 no-trace。
+    """
+    rows = []
+    for c in ([cfg] if cfg else config_dirs()):
+        for path in glob.glob(os.path.join(c, "traces", "*", "trace_*.jsonl")):
+            try:
+                rows.append((os.path.getmtime(path), path))
+            except OSError:
+                continue
+    rows.sort(reverse=True)
+    fallback = None
+    for mtime, path in rows[:40]:
+        strict, loose = _trace_candidates(path, mtime)
+        if strict:
+            return _make_trace(path, mtime, strict)
+        if loose and fallback is None:
+            fallback = (path, mtime, loose)
+    if fallback:
+        path, mtime, loose = fallback
+        return _make_trace(path, mtime, loose,
+                           "无 refusal_policy 标签（所有 trace 都没有，按宽松模式取样）")
     return None
 
 
 def layer_trace(trace, chunk_mtime):
-    """返回 (rows, verdict, dirty)。verdict: clean/older/dirty/no-trace。"""
+    """返回 (rows, verdict, dirty)。verdict: clean/older/dirty/unverified/no-trace。
+
+    判定顺序（B2/B3）：
+      1. older（请求早于本安装的补丁）→ "older"，即使内容脏也不计入失败：
+         补丁前的请求本来就带着旧块，拿它判失败会让"先发测试消息再部署"必报红。
+      2. 截断（messages=None）→ 计数只是下界，ALLOW_ONCE 的额度按 0 算（保守），
+         没有确认的脏块时返回 "unverified"，绝不能判 clean。
+      3. 否则按首轮/多轮判 dirty / clean。
+    """
     if not trace:
         return [{"where": "最新请求", "state": MISSING,
                  "detail": "没有 trace（还没发过请求）"}], "no-trace", []
     older = bool(chunk_mtime) and trace["mtime"] < chunk_mtime
+    truncated = bool(trace.get("truncated"))
     rows, dirty = [], []
+    detail = "%s  messages=%s%s%s%s" % (
+        ts(trace["mtime"]), trace["messages"],
+        "  [TRUNCATED]" if truncated else "",
+        "  ← 早于补丁，不能证明生效" if older else
+        ("  ← 截断，未完整验证（计数只是下界）" if truncated else ""),
+        ("  " + trace["note"]) if trace.get("note") else "")
     rows.append({"where": "    最新请求",
-                 "state": WARN if older else PASS,
-                 "detail": "%s  messages=%s%s%s"
-                           % (ts(trace["mtime"]), trace["messages"],
-                              "  [TRUNCATED]" if trace["truncated"] else "",
-                              "  ← 早于补丁，不能证明生效" if older else "")})
-    # messages<=2 视为首轮：一次性上下文允许出现 1 次
-    first_turn = (trace["messages"] or 0) <= 2
+                 "state": WARN if (older or truncated) else PASS,
+                 "detail": detail})
+    if older:
+        # 早于补丁的请求：内容再"脏"也是补丁前的历史，不算本次失败（B2）。
+        for k, n in trace["marks"].items():
+            rows.append({"where": "    %-26s" % k, "state": SKIP,
+                         "detail": "count=%d（早于补丁的旧请求，不计入失败）" % n})
+        for k, n in trace["blocks"].items():
+            rows.append({"where": "    %-26s" % ("<" + k), "state": SKIP,
+                         "detail": "count=%d（早于补丁的旧请求，不计入失败）" % n})
+        return rows, "older", []
+    # 截断时 messages 不知道：不准按首轮放行（B3），一次性上下文额度一律 0。
+    first_turn = (not truncated) and isinstance(trace["messages"], int) \
+        and trace["messages"] <= 2
     for k, n in trace["marks"].items():
         limit = 0 if k in MUST_ZERO else (1 if first_turn else 0)
         ok = n <= limit
         if not ok:
             dirty.append("%s=%d" % (k, n))
         rows.append({"where": "    %-26s" % k, "state": PASS if ok else FAIL,
-                     "detail": "count=%d (limit %d%s)" % (n, limit, "，首轮" if limit else "")})
+                     "detail": "count=%d (limit %d%s)%s"
+                               % (n, limit, "，首轮" if limit else "",
+                                  "（截断，未完整验证）" if truncated else "")})
     for k, n in trace["blocks"].items():
         if n:
             dirty.append("%s=%d" % (k, n))
         rows.append({"where": "    %-26s" % ("<" + k), "state": PASS if n == 0 else FAIL,
-                     "detail": "count=%d" % n})
+                     "detail": "count=%d%s" % (n, "（截断，未完整验证）" if truncated else "")})
     if dirty:
         return rows, "dirty", dirty
-    return rows, ("older" if older else "clean"), []
+    if truncated:
+        return rows, "unverified", []
+    return rows, "clean", []
 
 
-def decide(roots, active, failing, global_problems, warnings, unproven):
+def decide(roots, active, failing, global_problems, warnings, unproven, cfgs=None,
+           lite_only=None):
     """把逐层结果折算成 (verdict, reason, hard, soft)。
 
     规则（B：未在使用的安装不得一票否决）：
@@ -563,8 +769,18 @@ def decide(roots, active, failing, global_problems, warnings, unproven):
       * 有 active：只有 active 里的安装失败才算 hard；其余一律 soft（WARN）。
       * 没有 active：只有"全部安装都失败"才是 hard（无法判断在用哪套，保守判失败）；
         部分失败 -> soft（PARTIAL），不影响退出码。
+      * 空环境（B4）：找不到任何安装 / 没有任何数据目录，一律 NOT EFFECTIVE。
+        cfgs=None 表示"调用方没提供这项信息"（老调用点/单测），此时不据此判失败。
     """
     failing = {r: p for r, p in failing.items() if p}
+    empty_problems = []
+    if not roots:
+        empty_problems.append("本机没有找到任何 WorkBuddy 安装")
+    if cfgs is not None and not cfgs:
+        empty_problems.append("客户端从未冷启动，无缓存层可验证")
+    if empty_problems:
+        reason = "; ".join(empty_problems + list(global_problems))
+        return "NOT EFFECTIVE", reason, {r: p for r, p in failing.items()}, {}
     if active:
         hard = {r: p for r, p in failing.items() if r in active}
         soft = {r: p for r, p in failing.items() if r not in active}
@@ -573,16 +789,32 @@ def decide(roots, active, failing, global_problems, warnings, unproven):
     else:
         hard, soft = {}, dict(failing)
 
+    # 轻量态（只有出口清理、没有 v3 helper）是合法降级，但绝不是"已生效"：
+    # 它是当前使用的安装时，结论必须是 PARTIAL，不能是 EFFECTIVE（B1）。
+    lite_active = {r for r in (lite_only or ()) if r in active}
+
     if global_problems or hard:
         verdict = "NOT EFFECTIVE"
         reason = "; ".join(global_problems + [x for p in hard.values() for x in p])
+        if lite_active:
+            reason += ("；当前使用的安装只是轻量态（只打了出口清理，没有 v3 helper），"
+                       "未完全生效：%s" % ", ".join(sorted(lite_active)))
+        if soft:
+            reason += ("；另有 %d 套未在使用的安装没打全（WARN，不计入失败）：%s"
+                       % (len(soft), ", ".join(sorted(soft))))
+    elif lite_active:
+        verdict = "PARTIAL"
+        reason = ("当前使用的安装只是轻量态（只打了出口清理，没有 v3 helper），"
+                  "未完全生效：%s" % ", ".join(sorted(lite_active)))
         if soft:
             reason += ("；另有 %d 套未在使用的安装没打全（WARN，不计入失败）：%s"
                        % (len(soft), ", ".join(sorted(soft))))
     elif soft and not active:
         verdict = "PARTIAL"
+        # 必须写清"没打全"到底缺什么，否则只报一个安装名等于没说。
         reason = ("有 %d 套安装没打全（本机没有运行中的进程，无法判断你在用哪套）：%s"
-                  % (len(soft), ", ".join(sorted(soft))))
+                  % (len(soft), "; ".join(
+                      "%s ← %s" % (r, ", ".join(soft[r])) for r in sorted(soft))))
     elif soft:
         verdict = "EFFECTIVE"
         reason = ("当前使用的安装已生效；另有 %d 套未打全、不影响使用（WARN）：%s"
@@ -594,14 +826,24 @@ def decide(roots, active, failing, global_problems, warnings, unproven):
         reason = "所有层已生效，最新请求也已干净"
         if warnings:
             reason += "；另有提示：" + "; ".join(warnings)
+    if lite_active and verdict == "UNPROVEN":
+        # 轻量态的当前安装同样不能以"未证明"收场：它明确未完全生效（B1）。
+        verdict = "PARTIAL"
+        reason = ("当前使用的安装只是轻量态（只打了出口清理，没有 v3 helper），"
+                  "未完全生效：%s；另未证明：%s"
+                  % (", ".join(sorted(lite_active)), reason))
     return verdict, reason, hard, soft
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--install", action="append", default=[])
-    ap.add_argument("--json", action="store_true")
-    ap.add_argument("--write-report", action="store_true")
+    ap.add_argument("--json", action="store_true",
+                    help="stdout 只输出 JSON（人类报告请用 --report-file / --write-report）")
+    ap.add_argument("--write-report", action="store_true",
+                    help="把人类可读报告写到 reports/doctor-latest.txt")
+    ap.add_argument("--report-file", default="",
+                    help="把人类可读报告写到指定路径")
     args = ap.parse_args()
 
     roots = args.install or discover()
@@ -642,13 +884,19 @@ def main():
     chunk_paths = []
     chunk_owner = {}
     root_mtimes = {}
+    root_cfg = {}
+    lite_installs = set()          # 合法轻量态（只有出口清理、没有 v3）的安装
     cfg_owner = {}
     for root in roots:
         cfg = pair_config(root, cfgs)
+        root_cfg[root] = cfg
         if cfg:
             cfg_owner[cfg] = root
         emit("")
         emit("[2] CLI 运行时  %s" % root)
+        if not cfg:
+            emit("    数据目录  %-40s %-6s %s" % ("（未配对）", MISSING,
+                                                 "该安装没有对应的 .workbuddy* 数据目录"))
         c_rows, chunks = layer_cli(root)
         chunk_paths.extend(chunks)
         for c in chunks:
@@ -659,19 +907,24 @@ def main():
             emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
             if r["state"] in (FAIL, MISSING):
                 per_install.setdefault(root, []).append("cli %s: %s" % (r["where"].strip(), r["detail"]))
+                if r.get("lite_broken"):
+                    # 残缺 v3 已在 detail 里写明缺哪几块；这里再点一次，确保结论区读得懂。
+                    warnings.append("%s：v3 补丁残缺（%s），不计为已生效"
+                                    % (root, ",".join(r.get("missing") or [])))
             elif r["state"] == WARN:
                 warnings.append("cli %s: %s" % (r["where"].strip(), r["detail"]))
+                if r.get("lite_no_v3"):
+                    lite_installs.add(root)
 
         emit("")
         emit("[3] app.asar  %s" % root)
         a_rows = layer_asar(root)
         for r in a_rows:
             emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
-            if r["state"] == FAIL:
+            # MISSING 与 FAIL 同等计入：patch-asar 读不到状态 / asar 缺失不能静默放过（B5）
+            if r["state"] in (FAIL, MISSING):
                 per_install.setdefault(root, []).append("asar %s: %s" % (r["where"].strip(), r["detail"]))
-        report["installs"].append({"root": root, "cli": c_rows, "asar": a_rows})
-
-    chunk_mtime = max([os.path.getmtime(p) for p in chunk_paths] or [0.0])
+        report["installs"].append({"root": root, "cfg": cfg, "cli": c_rows, "asar": a_rows})
 
     procs = processes()
     emit("")
@@ -688,18 +941,50 @@ def main():
     for r in w_rows:
         emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
 
+    # [6] 按安装分别取 trace（B7）：每套安装配对自己的数据目录、用自己 chunk 的 mtime。
+    # 以前是全局挑一条最新 trace + 全局最大 chunk_mtime，A 安装刚打补丁会把 B 的
+    # trace 判成 older，或者拿 A 的干净 trace 证明 B 生效。
     emit("")
-    emit("[6] 最新真实请求（trace）")
-    trace = newest_trace()
-    tr_rows, tv, dirty = layer_trace(trace, chunk_mtime)
-    for r in tr_rows:
-        emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
-    if tv == "dirty":
-        global_problems.append("trace 仍带 " + ", ".join(dirty))
-    elif tv == "older":
-        unproven.append("最新请求早于补丁时间")
-    elif tv == "no-trace":
-        unproven.append("本机没有任何 trace")
+    emit("[6] 最新真实请求（trace，按安装分别验证）")
+    cfg_owners_count = {}
+    for c in root_cfg.values():
+        if c:
+            cfg_owners_count[c] = cfg_owners_count.get(c, 0) + 1
+    for root in roots:
+        cfg = root_cfg.get(root, "")
+        emit("    -- %s" % root)
+        if not cfg:
+            detail = "无该安装对应的 trace（该安装没有配对的数据目录）"
+            emit("    %-46s %-6s %s" % ("    最新请求", MISSING, detail))
+            unproven.append("%s: %s" % (root, detail))
+            report.setdefault("traces", []).append(
+                {"root": root, "cfg": "", "path": "", "mtime": 0,
+                 "verdict": "no-trace", "detail": detail})
+            continue
+        shared = "  （与另一套安装共用配置目录）" if cfg_owners_count.get(cfg, 0) > 1 else ""
+        emit("       cfg=%s%s" % (cfg, shared))
+        trace = newest_trace(cfg)
+        tr_rows, tv, dirty = layer_trace(trace, root_mtimes.get(root, 0.0))
+        for r in tr_rows:
+            emit("    %-46s %-6s %s" % (r["where"], r["state"], r["detail"]))
+        if tv == "dirty":
+            per_install.setdefault(root, []).append("trace 仍带 " + ", ".join(dirty))
+        elif tv == "older":
+            unproven.append("%s: 最新请求早于补丁时间" % root)
+        elif tv == "unverified":
+            unproven.append("%s: 最新请求被截断（>%d 字符），未完整验证"
+                            % (root, TRACE_TRUNC_HINT))
+        elif tv == "no-trace":
+            detail = "无该安装对应的 trace（没发过请求 / 没有可读的 generation span）"
+            emit("    %-46s %-6s %s" % ("    最新请求", MISSING, detail))
+            unproven.append("%s: %s" % (root, detail))
+        report.setdefault("traces", []).append(
+            {"root": root, "cfg": cfg, "path": (trace or {}).get("path", ""),
+             "mtime": (trace or {}).get("mtime", 0), "verdict": tv,
+             "messages": (trace or {}).get("messages"),
+             "truncated": (trace or {}).get("truncated", False),
+             "detail": ("; ".join(dirty) if tv == "dirty"
+                        else ((trace or {}).get("note") or ""))})
 
     emit("")
     emit("[7] 已安装运行时自检（拿你看到的原样块跑一遍）")
@@ -721,10 +1006,12 @@ def main():
     emit("       旧聊天会把它原样重发，看起来像“没生效”，实际是历史回放。")
     emit("    [1] removed_hits>0    → 模板层没部署到那个版本，重跑 deploy.cmd")
     emit("    [2] MISMATCH / FAIL   → chunk 没打上（文件名变了 / 没管理员 / 被安全软件拦）")
+    emit("    [2] 轻量态（无 v3）    → 只打了出口清理；v3 残缺是 FAIL，不是 WARN")
     emit("    [3] 某条 raw          → asar 没打上（应用在运行），关掉应用后重跑 deploy.cmd")
     emit("    [4] WARN 早于补丁     → 那个进程还在跑旧代码；开新聊天或重启应用")
     emit("    [5] idle prewarm>0    → 新聊天会复用旧 chunk；deploy 会自动停，也可手动 --apply")
     emit("    [6] 计数>0            → 这些块确实还在发给模型，按上面行号往上查")
+    emit("    [6] 截断 → 下界       → toolInput 约 20KB 处被截断，计数只是下界，不能当“干净”")
     emit("    [7] FAIL              → 磁盘上那份运行时删不掉该块，补丁没生效；")
     emit(r"                            可跑 scripts\wb-fix-lite.cmd（免 Python/Node、不依赖锚点）")
     emit("    若 [6][7] 全 PASS 而模型回答里仍有该块：")
@@ -759,16 +1046,30 @@ def main():
     for r, items in cfg_problems.items():
         failing.setdefault(r, []).extend(items)
 
-    verdict, reason, hard, soft = decide(roots, active, failing, global_problems, warnings, unproven)
+    verdict, reason, hard, soft = decide(roots, active, failing, global_problems,
+                                         warnings, unproven, cfgs=cfgs,
+                                         lite_only=lite_installs)
     report["verdict"], report["reason"] = verdict, reason
+    report["active"] = sorted(active)
+    report["lite_only"] = sorted(lite_installs)
+    report["unproven"] = list(unproven)
+    report["warnings"] = list(warnings)
 
     emit("")
     emit("[3.5] 每套安装的结论")
     for r in roots:
-        state = FAIL if r in hard else (WARN if r in failing else PASS)
+        # 轻量态既不是 FAIL（合法降级），也绝不能显示成 PASS（未完全生效）。
+        state = FAIL if r in hard else (
+            WARN if (r in failing or r in lite_installs) else PASS)
         tag = "当前使用" if r in active else ("未在使用" if active else "")
-        emit("    %-46s %-6s %s%s" % (r, state, tag,
-                                      "" if state != WARN else "  （未在使用的安装没打全：不影响当前结论）"))
+        note = ""
+        if r in lite_installs:
+            note = ("  （轻量态：未完全生效%s）"
+                    % ("，当前结论按 PARTIAL 处理" if r in active else "，且未在使用"))
+        elif state == WARN:
+            note = ("  （未在使用的安装没打全：不影响当前结论）" if active
+                    else "  （没有运行中的进程，无法判断在用哪套；结论按 PARTIAL）")
+        emit("    %-46s %-6s %s%s" % (r, state, tag, note))
 
     # 结论放最上面：窗口第一屏就能看到，不用滚到底。
     # 验证口径也放在结论区：旧会话历史里本来就存着旧块，用它验证永远"看起来没生效"。
@@ -778,18 +1079,32 @@ def main():
     lines[-1] = lines[-1] + "\n             旧聊天会把它原样重发，看起来像“没生效”，实际是历史回放。"
     lines = lines + rest
     text = "\n".join(lines)
-    print(text)
+
+    # B8：--json 时 stdout 只能是 JSON。人类可读报告改走 --report-file / --write-report。
+    out_paths = []
     if args.write_report:
         out_dir = os.path.join(PROJ, "reports")
         os.makedirs(out_dir, exist_ok=True)
-        path = os.path.join(out_dir, "doctor-latest.txt")
+        out_paths.append(os.path.join(out_dir, "doctor-latest.txt"))
+    if args.report_file:
+        out_paths.append(os.path.abspath(args.report_file))
+    for path in out_paths:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
-        print("report    : %s" % path)
-    if args.json:
+        report.setdefault("report_files", []).append(path)
+    if not args.json:
+        print(text)
+        for path in out_paths:
+            print("report    : %s" % path)
+    else:
+        for path in out_paths:
+            sys.stderr.write("report    : %s\n" % path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
     # 只有 NOT EFFECTIVE 才非 0：UNPROVEN 是"还没有新请求可证明"，PARTIAL 是
-    # "当前这套好了、别的安装没打全"，都不该让 deploy 报红。
+    # "当前这套好了、别的安装没打全/只是轻量态"，都不该让 deploy 报红。
     return 1 if verdict == "NOT EFFECTIVE" else 0
 
 

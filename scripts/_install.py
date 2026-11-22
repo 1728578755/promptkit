@@ -15,13 +15,16 @@ Resolution order (first hit wins):
 ``scripts/targets.json`` ships with empty paths on purpose: the PowerShell entry
 point (``scripts\\deploy.cmd -ListTargets``) discovers installations at run time
 from the uninstall registry, App Paths, running processes and the data-directory
-pairing. These Python helpers are standalone diagnostics, so they read only the
-pins the user wrote down plus the registry - the disk is never walked and folder
-names are never guessed.
+pairing. These Python helpers are standalone diagnostics: ``install_roots()``
+reads only the pins plus the registry, while ``install_roots_deep()`` adds the
+bounded disk scan (see the "对齐清单" block below) - the same drives / folders
+``target.ps1`` and ``doctor-basic.ps1`` scan. Folder names are never guessed as
+data-directory names; product.json's ``dataFolderName`` is authoritative.
 
 Import from a sibling script (``scripts/`` is on ``sys.path`` when you run
 ``python scripts\\something.py``).
 """
+import collections
 import json
 import os
 import subprocess
@@ -184,6 +187,20 @@ def find_product():
 # 下面这些来源都不写死任何路径：环境变量、注册表、正在运行的进程、开始菜单快捷方式，
 # 最后才做一次有深度上限的磁盘扫描。
 
+# ---- 磁盘发现规则（对齐清单）------------------------------------------------
+# 三处实现必须一致：本文件的 scan_locations()、target.ps1 的 Get-InstallCandidates、
+# doctor-basic.ps1 的 Find-Installs。
+#   * 盘符：C..K（跳过不存在的盘）
+#   * 盘根 <盘>:\：只看一层子目录，且只认名字含 workbuddy 的目录（便携版）；
+#     其下再深一层（有界深度 2）
+#   * 常见安装根：Program Files / Program Files (x86) / Apps / Programs / Software
+#     （每个再深 1 层）
+#   * 用户级：%LOCALAPPDATA%\Programs、%LOCALAPPDATA%\WorkBuddy（没有 Programs 这层）、
+#     <盘>:\Users\<用户>\AppData\Local\Programs
+# 只收"看着像 WorkBuddy"的候选（_looks_like_workbuddy）。
+DISCOVERY_DRIVE_LETTERS = "CDEFGHIJK"
+DISCOVERY_INSTALL_SUBDIRS = ("Program Files", "Program Files (x86)", "Apps", "Programs", "Software")
+
 def _process_roots():
     """正在运行的 WorkBuddy / codebuddy 进程 -> 它所在的安装目录。"""
     if os.name != "nt":
@@ -192,7 +209,7 @@ def _process_roots():
           "ForEach-Object { $_.ExecutablePath }")
     try:
         p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, encoding="mbcs",
+                           capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=60)
     except Exception:
         return []
@@ -226,7 +243,7 @@ def _shortcut_roots():
     )
     try:
         p = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, text=True, encoding="mbcs",
+                           capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=60)
     except Exception:
         return []
@@ -242,18 +259,22 @@ def scan_locations():
     """磁盘扫描会看的位置（给诊断报告用，说明"找过哪里"）。
 
     盘根、Program Files / Program Files (x86) / Apps / Programs / Software、
-    每个用户的 %LocalAppData%\\Programs，以及当前用户自己的
-    %LOCALAPPDATA%\\Programs（其它盘上的用户目录不一定被列出来）。
+    %LOCALAPPDATA%\\Programs、%LOCALAPPDATA%\\WorkBuddy（没有 Programs 这层），
+    以及每个用户的 %LocalAppData%\\Programs。
+
+    去重（dict.fromkeys 保序）：当前用户的 %LOCALAPPDATA%\\Programs 也会被 Users 循环
+    列到一次，重复扫描会让同一个 base 打印两遍、白扫一遍。
     """
     bases = []
     local = os.environ.get("LOCALAPPDATA")
     if local:
         bases.append(os.path.join(local, "Programs"))
-    for letter in "CDEFGHIJK":
+        bases.append(os.path.join(local, "WorkBuddy"))
+    for letter in DISCOVERY_DRIVE_LETTERS:
         drive = letter + ":\\"
         if not os.path.isdir(drive):
             continue
-        for sub in ("Program Files", "Program Files (x86)", "Apps", "Programs", "Software"):
+        for sub in DISCOVERY_INSTALL_SUBDIRS:
             bases.append(os.path.join(drive, sub))
         users = os.path.join(drive, "Users")
         if os.path.isdir(users):
@@ -263,25 +284,31 @@ def scan_locations():
                 names = []
             for u in names:
                 bases.append(os.path.join(users, u, "AppData", "Local", "Programs"))
-    return bases
+    return list(dict.fromkeys(bases))
 
 
 def _walk_for_asar(base, depth=2):
-    """在 base 下有界地找 resources\app.asar，只看目录名像 WorkBuddy 的。"""
+    """在 base 下有界（BFS）地找 WorkBuddy 安装根：<dir>\\resources\\app.asar。
+
+    只收 _looks_like_workbuddy() 通过的目录——Electron 应用都带 app.asar，
+    不先过滤的话别家应用也会算命中，很快把上限占满、把真安装挤掉。
+    深度 0：所有子目录都看一眼（有些安装器会多套一层厂商目录）；
+    更深一层只认名字里带 workbuddy 的，避免把整块盘翻一遍。
+    """
     if not os.path.isdir(base):
         return []
     hits = []
-    queue = [(base, 0)]
+    queue = collections.deque([(base, 0)])
     seen = 0
     while queue and seen < 2000:
-        cur, d = queue.pop()
+        cur, d = queue.popleft()
         seen += 1
-        if os.path.isfile(os.path.join(cur, "resources", "app.asar")):
+        if os.path.isfile(os.path.join(cur, "resources", "app.asar")) and _looks_like_workbuddy(cur):
             hits.append(cur)
         if d >= depth:
             continue
         try:
-            entries = os.listdir(cur)[:300]
+            entries = sorted(os.listdir(cur))[:300]
         except OSError:
             continue
         for name in entries:
@@ -289,20 +316,21 @@ def _walk_for_asar(base, depth=2):
             low = name.lower()
             if not os.path.isdir(path):
                 continue
-            # 深度 0：所有子目录都看一眼（有些安装器会多套一层厂商目录）；
-            # 更深一层只认名字里带 WorkBuddy 的，避免把整块盘翻一遍。
             if d == 0 or "workbuddy" in low:
                 queue.append((path, d + 1))
     return hits
 
 
 def _scan_roots():
+    """本机所有"像 WorkBuddy 的安装根"（磁盘扫描部分）。
+
+    扫遍全部 base 再截断：旧实现"扫满 12 个任意 Electron 应用就 break"，本机实测
+    28 个 base 被跳过，D:\\Program Files\\WorkBuddyAI 直接丢失。
+    """
     out = []
     for base in scan_locations():
         out.extend(_walk_for_asar(base))
-        if len(out) > 12:
-            break
-    return out
+    return _uniq(out)[:48]
 
 
 def _looks_like_workbuddy(root):

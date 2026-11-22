@@ -1,2 +1,35 @@
+# 行尾策略：目标只有一个 —— **zip 解压后与工作区逐字节一致**。
+#
+# git archive / GitHub Release 的 zip 是按 `.gitattributes` 的 eol 规则从索引里的
+# blob 生成的。旧规则 `* text=auto eol=lf` 把每个文本文件都转成 LF，于是
+# reports/promptkit-v1.3.18.zip 里所有 .ps1 都是 LF，而工作区它们是 CRLF。
+# PS 5.1 虽然靠 UTF-8 BOM 还能解析 LF 的 .ps1，但这属于"发布漂移"：
+# 用户在解压包里看到的文件与人测过的文件不是同一份字节。
+#
+# 现状（2026-11-22 逐文件实测）：
+#   *.ps1 绝大多数是 CRLF（deploy/apply/target/verify/restore/doctor-basic/
+#          test-verify-hook 等）；wb-fix-lite.ps1、test-launch-coverage.ps1 是 LF。
+#   *.py  绝大多数是 LF；patch-asar.py、refresh-cli-prewarm.py、verify-stack.py 是 CRLF。
+#   *.cmd  全部 CRLF。
+# 所以不能"一刀切按扩展名"：那会把上面这几个文件改成与工作区相反的行尾。
+# 规则写成：默认按内容自动（text=auto，检出用 LF），再对"工作区确实是 CRLF"
+# 的文件逐个锁 CRLF。新增文件默认走 LF——与工作区里多数新文件的习惯一致。
 * text=auto eol=lf
+
+# cmd.exe：必须 CRLF，否则 goto/label 解析会出错
 *.cmd text eol=crlf
+
+# 工作区为 CRLF 的 PowerShell 脚本（逐个列出，不按扩展名一刀切）
+scripts/apply.ps1            text eol=crlf
+scripts/deploy.ps1           text eol=crlf
+scripts/doctor-basic.ps1     text eol=crlf
+scripts/restore.ps1          text eol=crlf
+scripts/target.ps1           text eol=crlf
+scripts/test-verify-hook.ps1 text eol=crlf
+scripts/verify.ps1           text eol=crlf
+scripts/pull.ps1             text eol=crlf
+
+# 工作区为 CRLF 的 Python 脚本（同样逐个列出）
+scripts/patch-asar.py          text eol=crlf
+scripts/refresh-cli-prewarm.py text eol=crlf
+scripts/verify-stack.py        text eol=crlf

@@ -13,6 +13,13 @@ param(
     # --- scope ---
     [string]$Target = "all",
     [switch]$Elevate,
+    # Set automatically on the elevated re-run: keep the window open so the summary /
+    # error text can actually be read (Start-Process -Verb RunAs closes it instantly).
+    [switch]$PauseOnFinish,
+    # Captured by the parent before UAC; OTS elevation switches the account and with it
+    # %USERPROFILE% / %LOCALAPPDATA%, which hides the original user's .workbuddy*.
+    [string]$OriginalUserProfile = "",
+    [string]$OriginalLocalAppData = "",
     [switch]$DryRun,
     [switch]$SkipVerify,
     [switch]$Detailed,
@@ -56,6 +63,54 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# A5: the elevated window is a brand-new console; without a pause it vanishes the moment
+# the script ends, taking the summary and every error message with it. Declared up front so
+# an unexpected terminating error can still pause before the window closes.
+function Pause-BeforeExit([int]$code) {
+    if ($PauseOnFinish -and -not [Console]::IsInputRedirected) {
+        Write-Host ""
+        Write-Host "Press any key to close this window..." -ForegroundColor Yellow
+        try { $null = [Console]::ReadKey($true) } catch {
+            try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } catch { }
+        }
+    }
+    exit $code
+}
+
+# Same reason: an exception thrown outside the per-target try/catch would kill the elevated
+# window before Pause-BeforeExit is reached. Pause, print, then keep the real exit code.
+trap {
+    Write-Host ("!! " + $_.Exception.Message) -ForegroundColor Red
+    Pause-BeforeExit 1
+}
+
+# --- A5: elevation must not move the data directory to the administrator's profile ---
+# When a standard user answers the UAC prompt with an administrator's credentials (over
+# the shoulder), the elevated process runs as that administrator: %USERPROFILE% and
+# %LOCALAPPDATA% point at the admin's folders and the original user's .workbuddy* is
+# invisible. The parent passes its own values through -OriginalUserProfile /
+# -OriginalLocalAppData; overwriting the env of THIS process only (never the machine or
+# the user profile) makes every child script resolve the same data directory as before.
+# This runs before target.ps1 is dot-sourced, so all discovery sees the original paths.
+if ($OriginalUserProfile) {
+    if (Test-Path -LiteralPath $OriginalUserProfile) {
+        if ($env:USERPROFILE -and ($env:USERPROFILE.TrimEnd('\') -ine $OriginalUserProfile.TrimEnd('\'))) {
+            Write-Host ("elevated: using the original user profile {0} (this process only)" -f $OriginalUserProfile) -ForegroundColor DarkGray
+        }
+        $env:USERPROFILE = $OriginalUserProfile
+    } else {
+        Write-Host ("warning: -OriginalUserProfile not found: {0}" -f $OriginalUserProfile) -ForegroundColor Yellow
+    }
+}
+if ($OriginalLocalAppData) {
+    if (Test-Path -LiteralPath $OriginalLocalAppData) {
+        $env:LOCALAPPDATA = $OriginalLocalAppData
+    } else {
+        Write-Host ("warning: -OriginalLocalAppData not found: {0}" -f $OriginalLocalAppData) -ForegroundColor Yellow
+    }
+}
+
 $ScriptRoot = $PSScriptRoot
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $ScriptRoot "..")).Path
 $ps = Join-Path $PSHOME "powershell.exe"
@@ -97,16 +152,31 @@ elseif ($Pull) { $action = "pull" }
 
 
 # --- elevation: ask once, then every target is written from the same elevated run ---
-$needsAdmin = ((($action -eq "asar") -or ($action -eq "asar-restore") -or ($action -eq "cli-patch")) -and (-not $DryRun))
+# deploy writes the install mirror and the CLI chunk under Program Files, so it needs the
+# same elevation as asar / cli-patch; otherwise `-Target x` without -Elevate silently
+# degrades to cache-only. -DryRun writes nothing and must never prompt.
+$needsAdmin = ((($action -eq "deploy") -or ($action -eq "asar") -or ($action -eq "asar-restore") -or ($action -eq "cli-patch")) -and (-not $DryRun))
 if (($Elevate -or $needsAdmin) -and -not $isAdmin) {
     $fwd = @()
     foreach ($k in @($PSBoundParameters.Keys)) {
-        if ($k -eq 'Elevate') { continue }
+        if ($k -eq 'Elevate' -or $k -eq 'PauseOnFinish') { continue }
+        if ($k -eq 'OriginalUserProfile' -or $k -eq 'OriginalLocalAppData') { continue }
         $v = $PSBoundParameters[$k]
         if ($v -is [switch]) { if ($v.IsPresent) { $fwd += "-$k" } }
-        else { $fwd += "-$k"; $fwd += ('"{0}"' -f $v) }
+        else {
+            # Build a CreateProcess-safe quoted argument: escape embedded quotes and double
+            # a trailing backslash, which would otherwise escape the closing quote.
+            $sv = ([string]$v) -replace '"', '\"'
+            if ($sv.EndsWith('\')) { $sv = $sv + '\' }
+            $fwd += "-$k"
+            $fwd += ('"{0}"' -f $sv)
+        }
     }
     if ($fwd -notcontains "-Elevate") { $fwd += "-Elevate" }
+    # A5: remember the original user's folders before UAC switches the account.
+    if ($env:USERPROFILE) { $fwd += "-OriginalUserProfile"; $fwd += ('"{0}"' -f $env:USERPROFILE) }
+    if ($env:LOCALAPPDATA) { $fwd += "-OriginalLocalAppData"; $fwd += ('"{0}"' -f $env:LOCALAPPDATA) }
+    $fwd += "-PauseOnFinish"
     $argLine = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" ' -f $PSCommandPath) + ($fwd -join ' ')
     Write-Host "Requesting administrator privileges once (writes every detected install mirror)..." -ForegroundColor Yellow
     try {
@@ -117,16 +187,38 @@ if (($Elevate -or $needsAdmin) -and -not $isAdmin) {
     }
 }
 
+# Native capture under $ErrorActionPreference = "Stop" (PS 5.1).
+# In PS 5.1, redirecting a native command's stderr (2>&1) turns every stderr line into a
+# terminating RemoteException while ErrorActionPreference is "Stop". Since python writes
+# warnings/errors to stderr, a normal anchor miss would kill the whole target and the
+# wb-fix-lite fallback below became dead code. Only the capture runs under "Continue";
+# the previous preference is restored immediately afterwards.
+# Returns @{ ExitCode = <int>; Lines = <string[]> } - never throws on native stderr.
+function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments = @()) {
+    $prev = $ErrorActionPreference
+    $out = @()
+    $code = 0
+    try {
+        $ErrorActionPreference = 'Continue'
+        $out = @(& $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ })
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 0 }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return [pscustomobject]@{ ExitCode = $code; Lines = $out }
+}
+
 # --- python: target's own bundled runtime first, never a hard-coded path ---
-# 顺序：WORKBUDDY_PYTHON -> PATH 里的 python -> py launcher -> WorkBuddy 自带 binaries\python\versions。
+# 顺序：WORKBUDDY_PYTHON -> PATH 里的 python -> py launcher -> WorkBuddy 自带。
 # py launcher 用 `py -3 -c "import sys;print(sys.executable)"` 解出真实解释器，不猜安装位置。
 function Get-PyLauncherExe {
     foreach ($cand in @("py", "py.exe")) {
         $c = Get-Command $cand -ErrorAction SilentlyContinue
         if (-not $c) { continue }
         try {
-            $out = @(& $c.Source -3 -c "import sys;print(sys.executable)" 2>&1 | ForEach-Object { [string]$_ })
-            foreach ($line in $out) {
+            $r = Invoke-NativeCapture $c.Source @("-3", "-c", "import sys;print(sys.executable)")
+            foreach ($line in $r.Lines) {
                 $p = $line.Trim()
                 if ($p -and (Test-Path -LiteralPath $p) -and ($p -notmatch 'WindowsApps')) { return $p }
             }
@@ -135,33 +227,61 @@ function Get-PyLauncherExe {
     return $null
 }
 
+# Probe one python distribution directory without -Recurse: the user-level
+# ~/.workbuddy/binaries/python/versions/<ver> is an NTFS Junction (ReparsePoint) and
+# Get-ChildItem -Recurse does not follow it, so a direct Test-Path is the only reliable way.
+function Find-PythonInDir([string]$dir) {
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) { return $null }
+    foreach ($rel in @("python.exe", "envs\default\Scripts\python.exe")) {
+        $p = Join-Path $dir $rel
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return $null
+}
+
+# Probe a "versions" root: `current` pointer first, then every version directory newest-first.
+function Find-PythonInVersionsRoot([string]$root) {
+    if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { return $null }
+    $current = Join-Path $root "current"
+    if (Test-Path -LiteralPath $current -PathType Leaf) {
+        $rel = ""
+        try { $rel = (Get-Content -LiteralPath $current -TotalCount 1).Trim() } catch { }
+        if ($rel) {
+            $p = Find-PythonInDir (Join-Path $root $rel)
+            if ($p) { return $p }
+        }
+    }
+    $dirs = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending)
+    foreach ($d in $dirs) {
+        if ($d.Name -eq "current") { continue }
+        $p = Find-PythonInDir $d.FullName
+        if ($p) { return $p }
+    }
+    return $null
+}
+
 function Get-BundledPythonExe([string]$configDir, [string]$installPath) {
-    $roots = @()
-    foreach ($dir in @($configDir)) {
-        if ($dir) { $roots += (Join-Path $dir "binaries\python\versions") }
-    }
+    # 优先级（WorkBuddy 真实布局见 DIAGNOSIS-2026-11-22 F-04）：
+    #   1) <install>\resources\vendor\python\python.exe —— 客户端自带，真实存在（Python 3.13.14）
+    #   2) <configDir>\binaries\python\versions —— 客户端下载的用户级运行时（current 指针 + 版本目录）
+    #   3) <install>\resources\app.asar.unpacked\binaries\python\versions —— 解包布局
+    #   4) <install>\resources\binaries\python\versions —— 旧版打包布局（保持兼容）
+    # 不再拿 "%USERPROFILE% 下的某个开发机 conda 目录" 当来源：那不是 WorkBuddy 的一部分，
+    # 只会在开发机上掩盖"客户端自带运行时"缺失，在用户机上永远猜不中。
     if ($installPath) {
-        $roots += (Join-Path $installPath "resources\binaries\python\versions")
-        $roots += (Join-Path $installPath "resources\app.asar.unpacked\binaries\python\versions")
+        $vendor = Join-Path $installPath "resources\vendor\python\python.exe"
+        if (Test-Path -LiteralPath $vendor -PathType Leaf) { return $vendor }
     }
-    if ($env:USERPROFILE) {
-        $roots += (Join-Path $env:USERPROFILE "miniforge3")
+    $roots = @()
+    if ($configDir) { $roots += (Join-Path $configDir "binaries\python\versions") }
+    if ($installPath) {
+        $roots += (Join-Path $installPath "resources\app.asar.unpacked\binaries\python\versions")
+        $roots += (Join-Path $installPath "resources\binaries\python\versions")
     }
     foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        # 先看 "current" 指针，再按版本目录倒序找 python.exe
-        $current = Join-Path $root "current"
-        if (Test-Path -LiteralPath $current) {
-            $rel = ""
-            try { $rel = (Get-Content -LiteralPath $current -TotalCount 1).Trim() } catch { }
-            if ($rel) {
-                $p = Join-Path (Join-Path $root $rel) "python.exe"
-                if (Test-Path -LiteralPath $p) { return $p }
-            }
-        }
-        $hit = Get-ChildItem -LiteralPath $root -Filter "python.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch 'WindowsApps' } | Sort-Object FullName -Descending | Select-Object -First 1
-        if ($hit) { return $hit.FullName }
+        $p = Find-PythonInVersionsRoot $root
+        if ($p) { return $p }
     }
     return $null
 }
@@ -181,8 +301,13 @@ function Get-PythonSearchReport([string]$configDir, [string]$installPath = "") {
     # 找不到解释器时打印"找过哪里"，不能只丢一句 python not found。
     $lines = @("  - PATH: python / python3（WindowsApps 里的存根不算）")
     $lines += "  - py launcher: py -3"
-    if ($configDir) { $lines += ("  - WorkBuddy 自带: {0}" -f (Join-Path $configDir "binaries\python\versions")) }
-    if ($installPath) { $lines += ("  - 安装目录自带: {0}" -f (Join-Path $installPath "resources\binaries\python\versions")) }
+    if ($installPath) {
+        $lines += ("  - 安装目录自带: {0}" -f (Join-Path $installPath "resources\vendor\python\python.exe"))
+    }
+    if ($configDir) { $lines += ("  - WorkBuddy 用户级: {0}" -f (Join-Path $configDir "binaries\python\versions")) }
+    if ($installPath) {
+        $lines += ("  - 解包布局: {0}" -f (Join-Path $installPath "resources\app.asar.unpacked\binaries\python\versions"))
+    }
     return ($lines -join [Environment]::NewLine)
 }
 
@@ -192,7 +317,9 @@ function Invoke-Python([string]$pyExe, [string[]]$pyArgs) {
     try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
     $env:PYTHONIOENCODING = "utf-8"
     try {
-        & $pyExe -X utf8 @pyArgs 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+        $r = Invoke-NativeCapture $pyExe (@("-X", "utf8") + @($pyArgs))
+        foreach ($line in $r.Lines) { Write-Host $line }
+        $global:LASTEXITCODE = $r.ExitCode
     } finally {
         try { [Console]::OutputEncoding = $prevEnc } catch { }
         if ($null -eq $prevIo) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prevIo }
@@ -203,17 +330,12 @@ function Invoke-Python([string]$pyExe, [string[]]$pyArgs) {
 # Write-Host text is swallowed when the parent console is redirected (CI, piping, IDE),
 # and the summary ends up interleaved with blank padding lines.
 function Invoke-Child([string[]]$argv) {
-    $out = & $ps @argv 2>&1
-    $code = $LASTEXITCODE
-    foreach ($line in @($out)) {
+    $r = Invoke-NativeCapture $ps $argv
+    foreach ($line in @($r.Lines)) {
         if ($null -eq $line) { continue }
-        if ($line -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $line.ToString() -ForegroundColor Red
-        } else {
-            Write-Host ([string]$line)
-        }
+        Write-Host $line
     }
-    return $code
+    return $r.ExitCode
 }
 
 function New-Result([string]$name, [string]$label, [string]$act) {
@@ -286,8 +408,9 @@ function Invoke-AsarPatch($profile, $result) {
     # uc-seen seed / verify 之前起来，等于让新进程读一个还没收口的状态。
     $asarArgs += "--no-launch"
     try {
-        $asarOut = @(& $py @asarArgs 2>&1 | ForEach-Object { [string]$_ })
-        $asarCode = $LASTEXITCODE
+        $asarRun = Invoke-NativeCapture $py $asarArgs
+        $asarOut = @($asarRun.Lines)
+        $asarCode = $asarRun.ExitCode
     } finally {
         if ($null -eq $prevIo) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prevIo }
     }
@@ -301,7 +424,7 @@ function Invoke-AsarPatch($profile, $result) {
             # 只停 kind=prewarm + status=idle（按 PID），不碰主程序/当前聊天。
             $refresh = Join-Path $ScriptRoot "refresh-cli-prewarm.py"
             if ($py -and (Test-Path -LiteralPath $refresh) -and $profile.ConfigDir) {
-                $pr = @(& $py -X utf8 $refresh --apply --config-dir $profile.ConfigDir 2>&1 | ForEach-Object { [string]$_ })
+                $pr = @((Invoke-NativeCapture $py @("-X", "utf8", $refresh, "--apply", "--config-dir", $profile.ConfigDir)).Lines)
                 $stopped = @($pr | Where-Object { $_ -match '^stopped:' })
                 if ($stopped.Count -gt 0) { Add-Note $result ("prewarm " + $stopped[0]) }
             }
@@ -325,7 +448,7 @@ function Invoke-AsarPatch($profile, $result) {
     # 收口：打完再读一遍真实状态，任何一条没 patched / integrity 或 exe 清单对不上，都不许算成功
     if ($asarCode -eq 0 -and -not $SkipAsarPatch) {
         $stArgs = @("-X", "utf8", $script, "--status", "--asar", $asar)
-        $st = @(& $py @stArgs 2>&1 | ForEach-Object { [string]$_ })
+        $st = @((Invoke-NativeCapture $py $stArgs).Lines)
         $stBad = @($st | Where-Object {
                 $_ -match '^patch:\s+\S+\s+(raw|missing)\b' -or
                 $_ -match '^integ:\s+MISMATCH' -or
@@ -361,7 +484,7 @@ function Invoke-UcSeenSeed($profile, $result) {
     $env:PYTHONIOENCODING = "utf-8"
     $out = @()
     try {
-        $out = @(& $py @seedArgs 2>&1 | ForEach-Object { [string]$_ })
+        $out = @((Invoke-NativeCapture $py $seedArgs).Lines)
     } finally {
         if ($null -eq $prevIo) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prevIo }
     }
@@ -462,7 +585,9 @@ function Invoke-DeployTarget($profile) {
         Add-Note $result "no install mirror, cache only"
     }
     if (-not $writeInstall) { Add-Note $result "cache only" }
-    $result.Status = "OK"
+    # Never promote a FAIL to OK: cache empty / product.json / CLI anchors / asar all set
+    # Status = "FAIL" above, and the Summary plus the $failed count must reflect that.
+    if ($result.Status -ne "FAIL") { $result.Status = "OK" }
     return $result
 }
 
@@ -606,8 +731,9 @@ function Invoke-CliPatchTarget($profile) {
     try {
         $cliArgs = @("-X", "utf8", $script, "--apply", "--file", $distDir)
         if ($DryRun) { $cliArgs += "--dry-run" }
-        $out = @(& $py @cliArgs 2>&1 | ForEach-Object { [string]$_ })
-        $code = $LASTEXITCODE
+        $cliRun = Invoke-NativeCapture $py $cliArgs
+        $out = @($cliRun.Lines)
+        $code = $cliRun.ExitCode
     } finally {
         if ($null -eq $prevIo) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prevIo }
     }
@@ -618,10 +744,16 @@ function Invoke-CliPatchTarget($profile) {
         # 但结论保持 FAIL，让退出码和 Summary 如实反映"锚点未命中"。
         Add-Note $result "cli anchor patch FAILED (exit $code) - anchors not found in this build"
         $result.Status = "FAIL"
+        # -DryRun 绝不能写盘：wb-fix-lite 在干跑下也保持不写，这里连调用都跳过；
+        # 真调用时也把 -DryRun 透传下去（双保险，wb-fix-lite 自己的参数由它负责）。
         $lite = Join-Path $ScriptRoot "wb-fix-lite.ps1"
-        if (Test-Path -LiteralPath $lite) {
+        $loArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $lite, "-Install", $profile.InstallPath)
+        if ($DryRun) { $loArgs += "-DryRun" }
+        if ($DryRun) {
+            Write-Host "dry-run: anchor-free fetch scrub fallback skipped (nothing written)" -ForegroundColor DarkGray
+        } elseif (Test-Path -LiteralPath $lite) {
             Write-Host "anchor patch failed - applying the anchor-free fetch scrub as a fallback (result stays FAIL)" -ForegroundColor Yellow
-            $lo = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $lite -Install $profile.InstallPath 2>&1 | ForEach-Object { [string]$_ })
+            $lo = @((Invoke-NativeCapture $ps $loArgs).Lines)
             foreach ($line in $lo) { Write-Host $line }
             if (($lo -join "`n") -match '已写入|已有轻量补丁') {
                 Add-Note $result "fallback: anchor-free fetch scrub applied (anchor FAILURE still stands)"
@@ -629,7 +761,14 @@ function Invoke-CliPatchTarget($profile) {
         }
         return $result
     }
-    $st = @(& $py -X utf8 $script --status --file $distDir 2>&1 | ForEach-Object { [string]$_ })
+    if ($DryRun) {
+        # 干跑没写盘，磁盘上当然还是旧状态；拿 --status 判"补丁已生效"只会把每一次
+        # -DryRun 都变成 FAIL。锚点是否命中已经由上面的 exit code 回答，这里到此为止。
+        $result.Status = "OK"
+        Add-Note $result "dry-run: anchors matched, nothing written"
+        return $result
+    }
+    $st = @((Invoke-NativeCapture $py @("-X", "utf8", $script, "--status", "--file", $distDir)).Lines)
     if (@($st | Where-Object { $_ -match '^status:\s+PATCHED' }).Count -eq 0) {
         Add-Note $result "cli patch did not verify"
         $result.Status = "FAIL"
@@ -639,7 +778,7 @@ function Invoke-CliPatchTarget($profile) {
     # （按 PID），不碰主程序、也不碰当前聊天。下一次新聊天就会加载已打补丁的运行时。
     $refresh = Join-Path $ScriptRoot "refresh-cli-prewarm.py"
     if ((Test-Path -LiteralPath $refresh) -and -not $DryRun) {
-        $pr = @(& $py -X utf8 $refresh --apply --config-dir $profile.ConfigDir 2>&1 | ForEach-Object { [string]$_ })
+        $pr = @((Invoke-NativeCapture $py @("-X", "utf8", $refresh, "--apply", "--config-dir", $profile.ConfigDir)).Lines)
         $stopped = @($pr | Where-Object { $_ -match '^stopped:' })
         if ($stopped.Count -gt 0) { Add-Note $result ("prewarm " + $stopped[0]) }
     }
@@ -718,8 +857,11 @@ function Wait-ForAppClose($profiles) {
 function Start-WorkBuddyIfClosed($profiles) {
     # 「脚本结束要自动拉起」的唯一落点：所有写盘动作结束时都走这里。
     # 只启动，从不结束进程；-NoRelaunch 关掉。
+    # 多套安装时逐套判断：都关着就全都拉起，不能启动第一套就 return
+    # （那样第二套永远等不到）。
     if ($NoRelaunch) { Write-Host "App not started (-NoRelaunch)." -ForegroundColor DarkGray; return $false }
     $running = @()
+    $started = @()
     foreach ($p in $profiles) {
         if (-not $p.Installed -or -not $p.ExeName) { continue }
         $exe = $p.ExeName
@@ -733,12 +875,12 @@ function Start-WorkBuddyIfClosed($profiles) {
         }
         Start-Process -FilePath "explorer.exe" -ArgumentList ('"{0}"' -f $exe)
         Write-Host ("App started: {0}" -f $exe) -ForegroundColor Green
-        return $true
+        $started += $exe
     }
     if ($running.Count -gt 0) {
         Write-Host ("App already running: {0}" -f ($running -join ", ")) -ForegroundColor DarkGray
     }
-    return $false
+    return ($started.Count -gt 0)
 }
 
 function Invoke-StackVerify($profiles) {
@@ -775,8 +917,9 @@ function Invoke-StackVerify($profiles) {
         # PowerShell 5.1 抓原生命令 stdout 用的是控制台编码；不切成 UTF-8，
         # 报告里的中文结论会变成乱码，用户就更没法判断了。
         try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
-        $out = @(& $py -X utf8 $script 2>&1 | ForEach-Object { [string]$_ })
-        $code = $LASTEXITCODE
+        $stackRun = Invoke-NativeCapture $py @("-X", "utf8", $script)
+        $out = @($stackRun.Lines)
+        $code = $stackRun.ExitCode
     } finally {
         try { [Console]::OutputEncoding = $prevEnc } catch { }
         if ($null -eq $prev) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $prev }
@@ -797,7 +940,7 @@ function Invoke-StackVerify($profiles) {
 # --- list ---
 if ($action -eq "list") {
     try { $profiles = @(Resolve-TargetProfiles -Names $Target -ScriptRoot $ScriptRoot -InstallOverride $WorkBuddyPath -ConfigOverride $ConfigDir) }
-    catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }
+    catch { Write-Host $_.Exception.Message -ForegroundColor Red; Pause-BeforeExit 1 }
     Write-Host "== Targets ==" -ForegroundColor Cyan
     foreach ($p in $profiles) {
         Write-Host ("* {0,-14} {1}" -f $p.Name, $p.Label)
@@ -806,12 +949,12 @@ if ($action -eq "list") {
         Write-Host ("    cache:    {0}" -f $p.CacheRoot)
         if ($p.Overlay) { Write-Host ("    overlay:  {0}" -f $p.Overlay) }
     }
-    exit 0
+    Pause-BeforeExit 0
 }
 
 # --- resolve the target list once, then run the same action for every install ---
 try { $profiles = @(Resolve-TargetProfiles -Names $Target -ScriptRoot $ScriptRoot -InstallOverride $WorkBuddyPath -ConfigOverride $ConfigDir) }
-catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }
+catch { Write-Host $_.Exception.Message -ForegroundColor Red; Pause-BeforeExit 1 }
 Write-Host ("== {0}: {1} target(s): {2} ==" -f $action, $profiles.Count, (($profiles | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Cyan
 
 # 预检：需要 Python 的动作在开写之前就确认解释器存在。三条来源都没有时打印缺失清单
@@ -837,7 +980,7 @@ if (($pyActions -contains $action) -and -not $DryRun) {
         Write-Host "     2) start WorkBuddy once so its bundled runtime is unpacked" -ForegroundColor Yellow
         Write-Host "     3) run scripts\wb-fix-lite.cmd  (no Python / no Node, applies the CLI fetch scrub)" -ForegroundColor Yellow
         Write-Host "   Nothing was written." -ForegroundColor Yellow
-        exit 1
+        Pause-BeforeExit 1
     }
     Write-Host ("python  : {0}" -f $preflightPy) -ForegroundColor DarkGray
 }
@@ -887,27 +1030,34 @@ foreach ($r in $results) {
 $failed = @($results | Where-Object { $_.Status -eq "FAIL" }).Count
 
 # 逐层验收：cli 的 version/status、asar 的每个补丁、最新 trace 的标记计数，一次打出来。
-# 只对写盘动作跑，-DryRun 不跑；验收红也算失败，避免“看起来成功”。
-$writeActions = @("deploy", "cli-patch", "asar", "asar-restore", "restore")
+# 只对"补丁生效"类动作跑（deploy / cli-patch / asar），-DryRun 不跑；验收红也算失败。
+# restore / asar-restore 是还原动作：它们的目标恰恰是"补丁不再存在"，用"补丁全部生效"
+# 的验收去量它们必然 exit 1，把一次成功的还原报成失败。
+$writeActions = @("deploy", "cli-patch", "asar")
 if (($writeActions -contains $action) -and -not $DryRun) {
     Write-Host ""
     $verifyCode = Invoke-StackVerify $profiles
     if ($verifyCode -ne 0) { $failed += 1 }
 }
 
-# 结束即拉起：写盘类动作（deploy / cli-patch / asar / asar-restore / restore）跑完就启动应用；
-# 失败也启动——脚本结束时就该能看到结果，而不是再手动点一次图标。
+# 结束即拉起：写盘类动作（deploy / cli-patch / asar / asar-restore / restore）跑完就启动应用。
+# 失败时不启动：客户端一起来就会立刻重新锁住 app.asar / CLI chunk，用户连重跑都做不了；
+# 失败时给出明确提示，由用户自己决定什么时候启动。
 # 只读动作（list / verify / pull）与 -DryRun 不启动。
 $launchActions = @("deploy", "cli-patch", "asar", "asar-restore", "restore")
 if (($launchActions -contains $action) -and -not $DryRun) {
-    Start-WorkBuddyIfClosed $profiles | Out-Null
+    if ($failed -gt 0) {
+        Write-Host "App not started: the deploy had failures (starting it would re-lock app.asar). Fix the errors above, rerun, then start WorkBuddy." -ForegroundColor Yellow
+    } else {
+        Start-WorkBuddyIfClosed $profiles | Out-Null
+    }
 }
 
 if ($failed -gt 0) {
     Write-Host ("{0} target(s) failed." -f $failed) -ForegroundColor Red
-    exit 1
+    Pause-BeforeExit 1
 }
 if ($action -eq "deploy") {
     Write-Host "Open a new chat session in each app to pick up the new prompt." -ForegroundColor Green
 }
-exit 0
+Pause-BeforeExit 0

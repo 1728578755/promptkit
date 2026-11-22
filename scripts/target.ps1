@@ -14,6 +14,20 @@
 # If none of these knows the folder, there is no guessing: pass -WorkBuddyPath.
 # scripts\targets.json only carries optional overrides (pin a path, overlay, label).
 
+# ---- 磁盘发现规则（对齐清单）------------------------------------------------
+# 三处实现必须一致：本文件的 Get-InstallCandidates、_install.py 的 scan_locations()、
+# doctor-basic.ps1 的 Find-Installs。
+#   * 盘符：C..K（跳过不存在的盘）
+#   * 盘根 <盘>:\：只看一层子目录，且只认名字含 WorkBuddy 的目录（便携版）；
+#     其下再深一层（有界深度 2）
+#   * 常见安装根：Program Files / Program Files (x86) / Apps / Programs / Software
+#     （每个再深 1 层）
+#   * 用户级：%LOCALAPPDATA%\Programs、%LOCALAPPDATA%\WorkBuddy（没有 Programs 这层）、
+#     <盘>:\Users\<用户>\AppData\Local\Programs
+# 只收"看着像 WorkBuddy"的候选（Test-LooksLikeWorkBuddy，判据与 _install._looks_like_workbuddy 相同）。
+$script:DiscoveryDriveLetters = @("C", "D", "E", "F", "G", "H", "I", "J", "K")
+$script:DiscoveryInstallSubdirs = @("Program Files", "Program Files (x86)", "Apps", "Programs", "Software")
+
 # 父进程（deploy.ps1）把解析结果通过环境变量传给子脚本，子进程就不必再扫一遍盘。
 function Get-TargetEnvOverride([string]$id, [string]$kind) {
     if ([string]::IsNullOrWhiteSpace($id)) { return "" }
@@ -95,6 +109,35 @@ function Get-TargetExeName([string]$installPath) {
     return (Get-ProductExe $installPath)
 }
 
+# App Paths 的值不一定是 exe：可能是目录、也可能是分号分隔的 PATH 串（安装器写坏时很常见）。
+#   "C:\...\WorkBuddy.exe"            -> 父目录
+#   "C:\...\WorkBuddy"                -> 目录本身（误当 exe 做 Split-Path 会退到 C:\...\ 上一层）
+#   "C:\A;C:\B\WorkBuddy.exe"         -> 拆分后逐个判断，取存在的目录
+# 返回目录列表；空串/无法识别返回空列表。
+function Get-DirsFromAppPathValue([string]$value) {
+    $out = @()
+    if ([string]::IsNullOrWhiteSpace($value)) { return $out }
+    $v = $value.Trim().Trim('"')
+    if (-not $v) { return $out }
+    $parts = if ($v -like '*.exe*' -and $v.Contains(';')) { $v -split ';' } else { @($v) }
+    foreach ($part in $parts) {
+        $p = $part.Trim().Trim('"')
+        if (-not $p) { continue }
+        if ($p -like '*.exe') {
+            $dir = Split-Path $p -Parent
+            if ($dir) { $out += $dir }
+            continue
+        }
+        # 不是 exe：只要真的存在（或不像路径但父目录存在）就当目录收下。
+        if ([IO.Directory]::Exists($p)) { $out += $p }
+        elseif ($p.Contains('\')) {
+            $dir = Split-Path $p -Parent
+            if ($dir -and [IO.Directory]::Exists($dir)) { $out += $dir }
+        }
+    }
+    return $out
+}
+
 function Get-InstallCandidates {
     if ($null -ne $script:InstallCandidatesCache) { return $script:InstallCandidatesCache }
     $candidates = New-Object System.Collections.Generic.List[string]
@@ -122,7 +165,8 @@ function Get-InstallCandidates {
                     try {
                         $item = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
                         $exe = $item.'(default)'; if (-not $exe) { $exe = $item.Path }
-                        if ($exe) { & $add (Split-Path ($exe.Trim('"')) -Parent) }
+                        # 值可能是目录 / 分号分隔串，不能无条件 Split-Path -Parent（见 Get-DirsFromAppPathValue）
+                        foreach ($dir in @(Get-DirsFromAppPathValue ([string]$exe))) { & $add $dir }
                     } catch { }
                 }
         } catch { }
@@ -195,12 +239,16 @@ function Get-InstallCandidates {
     #    %LocalAppData%\Programs（含其它用户的同名目录）。只收"看着像 WorkBuddy"的目录，
     #    结果与前面几路合并去重（最后统一走 Test-TargetInstallRoot）。
     $scanBases = New-Object System.Collections.Generic.List[string]
-    $localPrograms = Join-Path $env:LOCALAPPDATA "Programs"
-    if ($env:LOCALAPPDATA -and (Test-Path -LiteralPath $localPrograms)) { $scanBases.Add($localPrograms) }
-    foreach ($letter in @("C", "D", "E", "F", "G", "H", "I", "J", "K")) {
+    if ($env:LOCALAPPDATA) {
+        # %LOCALAPPDATA%\Programs（常规用户级安装）
+        $scanBases.Add((Join-Path $env:LOCALAPPDATA "Programs"))
+        # %LOCALAPPDATA%\WorkBuddy（没有 \Programs 这一层，安装器直接放这里）
+        $scanBases.Add((Join-Path $env:LOCALAPPDATA "WorkBuddy"))
+    }
+    foreach ($letter in $script:DiscoveryDriveLetters) {
         $drive = "${letter}:\"
         if (-not (Test-Path -LiteralPath $drive)) { continue }
-        foreach ($sub in @("Program Files", "Program Files (x86)", "Apps", "Programs", "Software")) {
+        foreach ($sub in $script:DiscoveryInstallSubdirs) {
             $scanBases.Add((Join-Path $drive $sub))
         }
         $users = Join-Path $drive "Users"
@@ -217,20 +265,28 @@ function Get-InstallCandidates {
             Where-Object { Test-LooksLikeWorkBuddy $_.FullName } |
             ForEach-Object { & $add $_.FullName }
     }
-    # 盘根本身：便携版可能直接放在 <盘>:\WorkBuddy（只扫一层，且只认名字像 WorkBuddy 的目录）
-    foreach ($letter in @("C", "D", "E", "F", "G", "H", "I", "J", "K")) {
+    # 盘根本身：便携版可能直接放在 <盘>:\WorkBuddy（只扫一层，且只认名字像 WorkBuddy 的目录）；
+    # 再往下一层（<盘>:\<vendor>\WorkBuddy）有界扫一次，对齐 _install.py 的 <盘>:\ 规则。
+    foreach ($letter in $script:DiscoveryDriveLetters) {
         $drive = "${letter}:\"
         if (-not (Test-Path -LiteralPath $drive)) { continue }
         Get-ChildItem -LiteralPath $drive -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like "*WorkBuddy*" } |
-            ForEach-Object { & $add $_.FullName }
+            ForEach-Object {
+                if ($_.Name -like "*WorkBuddy*") { & $add $_.FullName; return }
+                Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -like "*WorkBuddy*" } |
+                    ForEach-Object { & $add $_.FullName }
+            }
     }
 
     $seen = @{}
     $result = @()
     foreach ($c in $candidates) {
         if ([string]::IsNullOrWhiteSpace($c)) { continue }
-        $full = [IO.Path]::GetFullPath($c.Trim('"'))
+        # 注册表/快捷方式里的脏值（引号、多余空格、非法字符）会让 GetFullPath 直接抛，
+        # 这里逐条兜住：坏掉的候选跳过，不影响其它安装。
+        try { $full = [IO.Path]::GetFullPath($c.Trim().Trim('"')) } catch { continue }
+        if (-not $full) { continue }
         if ($seen.ContainsKey($full.ToLowerInvariant())) { continue }
         $seen[$full.ToLowerInvariant()] = $true
         $exe = Get-TargetExeName $full
@@ -274,39 +330,132 @@ function Get-DataDirCandidates {
     return $script:DataDirCandidatesCache
 }
 
-function Get-InstallPathFromDataDir([string]$configDir) {
+# 从任意字符串里截出安装根：命中 "<install>\resources\app.asar.unpacked" 前缀就取前面那段。
+# scopeKey 里存的是 JSON 数组字符串，反斜杠是转义过的，所以先把 \\ 还原成 \ 再匹配。
+function Get-InstallRootFromScopeString([string]$value) {
+    if ([string]::IsNullOrWhiteSpace($value)) { return "" }
+    $s = $value.Trim()
+    if ($s.StartsWith('"') -and $s.EndsWith('"') -and $s.Length -ge 2) { $s = $s.Substring(1, $s.Length - 2) }
+    $s = $s -replace '\\\\', '\'
+    # 只有盘符路径才可能是安装根（排除 skill 名、插件 id、空串之类的元素）
+    if ($s -notmatch '^[A-Za-z]:\\') { return "" }
+    $m = [regex]::Match($s, '^(.*?)\\resources\\app\.asar\.unpacked(\\|$)')
+    if ($m.Success -and $m.Groups[1].Value) { return $m.Groups[1].Value.TrimEnd('\') }
+    return ""
+}
+
+# 递归解析 scopeKey：可能是 1) 单路径字符串（旧格式）；2) JSON 数组字符串（实测格式，
+# 元素里还有嵌套的 JSON 数组字符串）；3) 已解析出来的数组/对象。返回第一个命中的安装根。
+function Resolve-ScopeKeyInstallRoot($value, [int]$depth = 0) {
+    if ($null -eq $value -or $depth -gt 4) { return "" }
+    if ($value -is [string]) {
+        $direct = Get-InstallRootFromScopeString $value
+        if ($direct) { return $direct }
+        $t = $value.Trim()
+        if ($t.StartsWith('[') -or $t.StartsWith('{')) {
+            try { $parsed = $t | ConvertFrom-Json } catch { return "" }
+            return (Resolve-ScopeKeyInstallRoot $parsed ($depth + 1))
+        }
+        return ""
+    }
+    if ($value -is [System.Collections.IEnumerable]) {
+        foreach ($item in $value) {
+            $hit = Resolve-ScopeKeyInstallRoot $item ($depth + 1)
+            if ($hit) { return $hit }
+        }
+    }
+    return ""
+}
+
+function Get-InstallPathFromDataDir {
+    param([string]$ConfigDir, [string]$Encoding = "")
+    $configDir = $ConfigDir
+    if ([string]::IsNullOrWhiteSpace($configDir)) { return "" }
     $cacheFile = Join-Path $configDir ".skill-list-cache.json"
     if (Test-Path -LiteralPath $cacheFile) {
         try {
-            $j = Get-Content -LiteralPath $cacheFile -Raw | ConvertFrom-Json
-            foreach ($s in @($j.scopeKey)) {
-                if ($s -is [string] -and $s -match '^(.*?)\\resources\\app\.asar\.unpacked\\resources\\plugins\\') {
-                    return $Matches[1]
-                }
-                if ($s -is [string] -and $s -match '^(.*?)\\resources\\app\.asar\.unpacked$') {
-                    return $Matches[1]
+            # -Encoding UTF8：文件是无 BOM UTF-8，PS 5.1 的 Get-Content -Raw 默认按 ANSI(GBK) 读，
+            # 中文描述会变乱码，ConvertFrom-Json 直接抛异常（异常又被 catch 吞掉 = 永远返回 ""）。
+            $gcArgs = @{ LiteralPath = $cacheFile; Raw = $true }
+            if ($Encoding) { $gcArgs.Encoding = $Encoding } else { $gcArgs.Encoding = "UTF8" }
+            $j = Get-Content @gcArgs | ConvertFrom-Json
+            $hit = Resolve-ScopeKeyInstallRoot $j.scopeKey
+            if ($hit) { return $hit }
+        } catch { }
+    }
+    # 客户端自己的插件市场登记：workbuddy-builtin 的 source.path / installLocation 就是
+    # <install>\resources\app.asar.unpacked\resources\plugins\workbuddy-builtin。
+    # 有的数据目录（实测 .workbuddy）没有 .skill-list-cache.json，但有这个文件。
+    $market = Join-Path $configDir "plugins\known_marketplaces.json"
+    if (Test-Path -LiteralPath $market) {
+        try {
+            $mj = Get-Content -LiteralPath $market -Raw -Encoding UTF8 | ConvertFrom-Json
+            $hits = @()
+            foreach ($prop in $mj.PSObject.Properties) {
+                foreach ($v in @($prop.Value.source.path, $prop.Value.installLocation)) {
+                    $hit = Get-InstallRootFromScopeString ([string]$v)
+                    if ($hit) { $hits += $hit }
                 }
             }
+            foreach ($hit in $hits) { if (Test-TargetInstallRoot $hit "") { return $hit } }
+            if ($hits.Count -gt 0) { return $hits[0] }
         } catch { }
     }
     $settings = Join-Path $configDir "settings.json"
     if (Test-Path -LiteralPath $settings) {
         try {
-            $raw = Get-Content -LiteralPath $settings -Raw
+            $raw = Get-Content -LiteralPath $settings -Raw -Encoding UTF8
             $m = [regex]::Match($raw, '([A-Za-z]:\\\\[^"]*?)\\\\resources\\\\app\.asar\.unpacked')
             if ($m.Success) { return ($m.Groups[1].Value -replace '\\\\', '\') }
+            $m = [regex]::Match($raw, '([A-Za-z]:\\[^"]*?)\\resources\\app\.asar\.unpacked')
+            if ($m.Success) { return $m.Groups[1].Value }
         } catch { }
     }
     return ""
 }
 
-# 数据目录按安装反查，不写死产品名：先看哪个 .workbuddy* 的 .skill-list-cache.json 指向这套安装，
-# 再退回 <USERPROFILE>\.<id>（id 由安装目录名推导：WorkBuddy → workbuddy，WorkBuddyAI → workbuddy-ai）。
+# 产品自报的数据目录名：<install>\...\cli\product.json 的 dataFolderName（实测 .workbuddy / .workbuddy-ai）。
+# 这是最权威的配对依据——安装目录名可以是任意改名（D:\Portable\WB），product.json 不会说谎。
+# name 字段实测为空，不能用；endpoint 只说明连哪套服务，也不如 dataFolderName 直接。
+function Get-DataFolderName([string]$installPath) {
+    if ([string]::IsNullOrWhiteSpace($installPath)) { return "" }
+    $rels = @(
+        "resources\app.asar.unpacked\cli\product.json",
+        "resources\app.asar.unpacked\node_modules\@genie\agent-harness\cli\product.json"
+    )
+    foreach ($rel in $rels) {
+        $p = Join-Path $installPath $rel
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            $raw = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)
+            $j = $raw | ConvertFrom-Json
+            $folder = [string]$j.dataFolderName
+            if ($folder) { return $folder.Trim().TrimEnd('\', '/') }
+        } catch { }
+    }
+    return ""
+}
+
+# 数据目录按安装反查，不写死产品名：
+#   1) 哪个数据目录的 .skill-list-cache.json 指向这套安装（最直接的证据）
+#   2) product.json 的 dataFolderName（新环境没有 skill-list-cache 时的权威依据）
+#   3) 没有配对时由 Get-DefaultConfigDir 退回 <USERPROFILE>\.<id>（安装目录叶名推导，兜底）
 function Get-PairedConfigDir([string]$installPath) {
     if ([string]::IsNullOrWhiteSpace($installPath)) { return "" }
+    $target = $installPath.TrimEnd('\')
     foreach ($dir in @(Get-DataDirCandidates)) {
         $paired = Get-InstallPathFromDataDir $dir
-        if ($paired -and $paired.TrimEnd('\') -ieq $installPath.TrimEnd('\')) { return $dir }
+        if ($paired -and $paired.TrimEnd('\') -ieq $target) { return $dir }
+    }
+    $folder = Get-DataFolderName $installPath
+    if ($folder) {
+        foreach ($dir in @(Get-DataDirCandidates)) {
+            if ((Split-Path -Leaf $dir) -ieq $folder) { return $dir }
+        }
+        $abs = if ([IO.Path]::IsPathRooted($folder)) { $folder }
+               elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE $folder }
+               else { "" }
+        if ($abs -and [IO.Directory]::Exists($abs)) { return $abs }
     }
     return ""
 }
@@ -315,7 +464,17 @@ function Get-DefaultConfigDir {
     param([string]$InstallPath = "", [string]$Id = "")
     $paired = Get-PairedConfigDir $InstallPath
     if ($paired) { return $paired }
-    if ($Id -and $env:USERPROFILE) { return (Join-Path $env:USERPROFILE ".$Id") }
+    # 新环境（还没有 .skill-list-cache.json）：按 product.json 的 dataFolderName 推导，
+    # 而不是按安装目录叶名猜——D:\Portable\WB 反推出 .wb 是错的，product.json 里写着 .workbuddy。
+    $folder = Get-DataFolderName $InstallPath
+    if ($folder) {
+        if ([IO.Path]::IsPathRooted($folder)) { return $folder }
+        if ($env:USERPROFILE) { return (Join-Path $env:USERPROFILE $folder) }
+    }
+    # 兜底：<USERPROFILE>\.<id>。Id 可能来自 -Target 的 selector（"workbuddy@C:\..."）或带路径，
+    # 截掉 @ 之后的部分再拼，避免生成 ".workbuddy@C:\..." 这种非法目录名。
+    $idClean = if ($Id) { ($Id -split '@')[0].Trim() } else { "" }
+    if ($idClean -and $env:USERPROFILE) { return (Join-Path $env:USERPROFILE ".$idClean") }
     return ""
 }
 
@@ -384,8 +543,49 @@ function Get-DiscoveredTargets {
         }
     }
 
-    $script:DiscoveredTargetsCache = @($result | Sort-Object Id -Unique)
+    # 同一 Id 的多套安装（C:\Program Files\WorkBuddy 与 D:\WorkBuddy 叶名相同）必须全部保留：
+    # 静默丢掉任何一套，用户就会以为部署覆盖了全部安装。重复的标 DuplicateId=true，
+    # 下游用 Selector（Id 唯一时就是 Id，重复时是 Id@InstallPath）区分。
+    $idCount = @{}
+    foreach ($r in $result) {
+        $k = ([string]$r.Id).ToLowerInvariant()
+        $idCount[$k] = 1 + $(if ($idCount.ContainsKey($k)) { $idCount[$k] } else { 0 })
+    }
+    foreach ($r in $result) {
+        $dup = ($idCount[([string]$r.Id).ToLowerInvariant()] -gt 1)
+        $r | Add-Member -NotePropertyName DuplicateId -NotePropertyValue $dup -Force
+        $sel = if ($dup) { "$($r.Id)@$($r.InstallPath)" } else { [string]$r.Id }
+        $r | Add-Member -NotePropertyName Selector -NotePropertyValue $sel -Force
+    }
+
+    $script:DiscoveredTargetsCache = @($result | Sort-Object Id, InstallPath)
     return $script:DiscoveredTargetsCache
+}
+
+# -Target 选择器解析：既接受 id（"workbuddy"），也接受 Id+InstallPath 消歧形式
+#   "workbuddy@C:\Program Files\WorkBuddy"   或直接给安装路径 "C:\Program Files\WorkBuddy"
+# 同一 Id 有多套安装时，裸 id 会命中多条 —— 由调用方报错要求消歧，绝不静默取第一条。
+function Select-DiscoveredTargets($discovered, [string]$name) {
+    if ([string]::IsNullOrWhiteSpace($name)) { return @() }
+    $n = $name.Trim()
+    $at = $n.IndexOf('@')
+    if ($at -gt 0) {
+        $idPart = $n.Substring(0, $at).Trim()
+        $pathPart = $n.Substring($at + 1).Trim().Trim('"')
+        return @($discovered | Where-Object {
+                $_.Id -ieq $idPart -and
+                $pathPart -and
+                ($_.InstallPath.TrimEnd('\') -ieq $pathPart.TrimEnd('\') -or
+                 $_.InstallPath.TrimEnd('\').ToLowerInvariant().StartsWith($pathPart.TrimEnd('\').ToLowerInvariant() + '\'))
+            })
+    }
+    if ($n -match '^[A-Za-z]:[\\/]') {
+        return @($discovered | Where-Object {
+                $_.InstallPath.TrimEnd('\') -ieq $n.TrimEnd('\') -or
+                $_.InstallPath.TrimEnd('\').ToLowerInvariant().StartsWith($n.TrimEnd('\').ToLowerInvariant() + '\')
+            })
+    }
+    return @($discovered | Where-Object { $_.Id -ieq $n })
 }
 
 function Resolve-TargetProfile {
@@ -414,7 +614,15 @@ function Resolve-TargetProfile {
     }
 
     $conf = $configured | Where-Object { $_.Name -eq $name2 } | Select-Object -First 1
-    $disc = $discovered | Where-Object { $_.Id -eq $name2 } | Select-Object -First 1
+    # 同 Id 多套安装时必须按 InstallPath 消歧：-Target "workbuddy@D:\WorkBuddy"、-Target "D:\WorkBuddy"，
+    # 或直接给 -WorkBuddyPath。裸 id 命中多条就明确报错，不静默挑一条。
+    $matches = @(Select-DiscoveredTargets $discovered $name2)
+    $disc = if ($matches.Count -eq 1) { $matches[0] } else { $null }
+    if ($matches.Count -gt 1 -and -not $InstallOverride) {
+        $sel = ($matches | ForEach-Object { $_.Selector }) -join ', '
+        throw ("Multiple installations share the id '$name2': $sel. " +
+               "Pass -Target '<id>@<install path>' (or -WorkBuddyPath '<install path>') to pick one.")
+    }
     if (-not $conf -and -not $disc) {
         # 显式给了路径就按它建一个临时目标（便携版 / 未注册的安装），不再猜目录
         $explicitInstall = if ($InstallOverride) { Expand-TargetToken $InstallOverride } else { "" }
@@ -457,7 +665,9 @@ function Resolve-TargetProfile {
                  elseif ($disc) { $disc.ConfigDir }
                  else { "" }
     if (-not $configDir) {
-        $configDir = Get-DefaultConfigDir -InstallPath $install -Id $name2
+        # Id 只用干净的安装 id（selector 可能是 "id@path"，不能拿来拼 .<id>）
+        $idForConfig = if ($disc -and $disc.Id) { $disc.Id } else { $name2 }
+        $configDir = Get-DefaultConfigDir -InstallPath $install -Id $idForConfig
     }
     if (-not (Test-ClientDataDir $configDir)) {
         # 反查/推导出来的目录不存在时，退回"唯一一个像数据目录的 .workbuddy*"
@@ -476,8 +686,13 @@ function Resolve-TargetProfile {
                else { "" }
     if ($overlay -and -not [IO.Path]::IsPathRooted($overlay)) { $overlay = Join-Path (Split-Path $ScriptRoot -Parent) $overlay }
 
+    # 同 Id 多套安装时 Name 用 Selector（id@install），父进程传给子脚本的 -Target 仍能唯一定位；
+    # 无重复时保持原 id，向后兼容。
+    $profileName = if ($disc -and $disc.DuplicateId) { $disc.Selector } else { $name2 }
+
     return [pscustomobject]@{
-        Name = $name2
+        Name = $profileName
+        Id = if ($disc -and $disc.Id) { $disc.Id } else { $name2 }
         Label = if ($c -and $c.label) { $c.label } elseif ($disc) { $disc.Label } else { $name2 }
         InstallPath = $install
         ExeName = $exeName
@@ -493,7 +708,9 @@ function Get-TargetNames([string]$ScriptRoot = $PSScriptRoot) {
     $cfg = Get-TargetConfig $ScriptRoot
     $ids = @()
     if ($cfg.targets) { $ids += @($cfg.targets.PSObject.Properties.Name) }
-    $ids += @(Get-DiscoveredTargets | ForEach-Object { $_.Id })
+    # 同 Id 多套安装时用 Selector（id@install）而不是裸 id，否则 Resolve-TargetProfile 会消歧失败、
+    # "all" 会漏掉其中一套。
+    $ids += @(Get-DiscoveredTargets | ForEach-Object { if ($_.DuplicateId) { $_.Selector } else { $_.Id } })
     return @($ids | Select-Object -Unique)
 }
 

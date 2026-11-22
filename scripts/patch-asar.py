@@ -37,8 +37,28 @@ WorkBuddy 的 Electron 启用了 asar 完整性校验，改 asar 必须同时满
 - 备份原始字节片段（几百字节，不是 173 MB）+ 补丁前后全文件 SHA256；
 - 解出承载 bundle 跑 `node --check`；
 - 写完后重新解析 asar 头，断言 integrity.hash/blocks 与实际内容一致；
+- **asar 与 exe 的写入是一个事务**：exe 写失败（权限 / 被锁 / 任何异常）立即
+  回滚 asar 并打印"已回滚 asar，避免 integrity 失配"——app.asar 已改而 exe
+  清单没跟上，客户端启动会直接 `FATAL asar_util.cc:143 Integrity check failed`；
+- 备份目录先以 `tmp-<stamp>-asar-current-time` 存在，写盘成功且回读 / integrity /
+  exe 清单 / 语法全部通过后才改名为正式备份；失败或回滚时删掉临时目录，
+  `latest_backup()` 只认正式备份（`tmp-` / `failed-` 前缀一律跳过）；
 - 任何一步失败，内容、头哈希、exe 清单一起回滚；
 - `--restore` 断言 asar 与 exe 的 SHA256 都回到 shaBefore。
+
+补丁分级（2026-11-22）
+----------------------
+`core` = `current-time` / `current-time-cloud`：入口清洗与云下发阻断，缺了它们
+补丁等于没打。core 锚点失配 → 整体 exit 2，一个字节都不写（保持原有语义）。
+
+`aux` = 其余补丁。aux 锚点失配只跳过这一条，core 与可用的 aux 照常写入，
+exit 0 并在 stdout 打出 `N 条补丁未应用（锚点失配）`。`--status` 里把这种
+"本构建没有锚点"的补丁标成 `skipped`（区别于"可打但还没打"的 `raw`）。
+
+`user-context-once` 已移除：它把判据写进渲染进程的 `localStorage`，而那个
+bundle 里 `localStorage` 并不存在（现有用法全被 `typeof localStorage<'u'` 或
+try/catch 保护），`self.localStorage?.` 静默 no-op，实测从未生效。判据现在由
+`user-context-durable` 落在主进程磁盘上。
 
 用法
 ----
@@ -56,6 +76,7 @@ WorkBuddy 的 Electron 启用了 asar 完整性校验，改 asar 必须同时满
 升级后重跑一次。
 """
 import argparse
+import fnmatch
 import glob
 import hashlib
 import json
@@ -73,7 +94,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _install  # noqa: E402  sibling helper: locate an install without hardcoding
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BACKUP_ROOT = os.path.join(PROJECT_ROOT, "backups")
+# WORKBUDDY_BACKUP_ROOT 只给自测/仿真用：把备份写到临时目录，不污染真实 backups/。
+BACKUP_ROOT = (os.environ.get("WORKBUDDY_BACKUP_ROOT")
+               or os.path.join(PROJECT_ROOT, "backups"))
 DEFAULT_BLOCK_SIZE = 4 * 1024 * 1024
 
 # AdditionalDataSection.render 里的那一段
@@ -217,13 +240,23 @@ def _pairs_scene_chip(data):
     """把场景引用的序列化文本置空：chip 还是 chip，但发出去的文字里不再有 @scene#…
 
     两个副本：main/account.js（拼 prompt 用）与 renderer/assets/common-*.js（输入框序列化用）。
+
+    两个副本都在才算这条补丁"能打"：只打主进程那一处，输入框序列化仍然会把
+    `@scene#…` 写进消息文本，等于补丁只生效一半却报成功。所以任一副本的锚点
+    缺失都抛 ValueError —— 由 collect_content_edits 归入 missing_aux，
+    apply 会打 WARN 并把这条标成 skipped（上层照常写 core + 其它 aux）。
     """
     pairs = []
+    found = []
     for old, var in ((SCENE_MAIN_OLD, b"yn"), (SCENE_RENDERER_OLD, b"E")):
         if data.count(old) != 1:
             continue
         prefix = b"if(e.uri.startsWith(" + var + b")){return{text:``}"
         pairs.append((old, _sandwich(prefix, b"}", len(old))))
+        found.append("main" if var == b"yn" else "renderer")
+    if len(pairs) != 2:
+        raise ValueError("scene-chip 只找到 %d/2 处副本（%s）——主进程与 renderer 必须都在"
+                         % (len(pairs), ", ".join(found) or "无"))
     return pairs
 
 
@@ -263,14 +296,16 @@ def _pairs_project_layout(data):
     ]
 
 
-# ---- user-context 一次性（2026-11-17 第七轮）--------------------------------
-# 硬性规则：<system-reminder data-role="user-context"> 只在会话第一轮出现。
-# 上游的判据是 `alreadyInjectedUserContext`，取值来自渲染进程内存里的
-#   this.sessionInjectedUserContext.has(sessionId)   —— 一个 Set，进程一换就空。
-# 换工作区 / 重启 / 换进程 → 判据归零 → user_info、自定义指令、project_context、
-# connector-status 又整体注一遍（实测 1,684 字符/轮）。
-# 改法：把这条内存标记落到 localStorage（同 bundle 里已有 8 处 localStorage 用法），
-#   并把 connector-status 也纳入同一个判据（它原本不在 first_turn 门里）。
+# ---- user-context 一次性（2026-11-17 第七轮）—— 已废弃，仅留档 ---------------
+# **2026-11-22 移除**：这条补丁把「已注入」判据写到渲染进程的 localStorage
+#   this.sessionInjectedUserContext.has(a)  →  self.localStorage?.getItem(a)
+# 但那个 bundle 里 localStorage 并不存在（自带的 8 处用法全被
+# `typeof localStorage<'u'` 或 try/catch 保护），`self.localStorage?.` 静默
+# no-op；源码注释当时就自承「实测从未生效」。真实请求里
+# alreadyInjectedUserContext 53/53 全是 false（11/18–11/21 日志）。
+# 判据现在由下面的 `user-context-durable` 落在主进程磁盘上，所以这条不再
+# 注册进 PATCHES：不写、不检查、`--status` 也不再列它（已打过它的旧安装
+# 无需还原，那段 bytes 只是死代码）。
 UC_HAS_OLD = b"this.sessionInjectedUserContext.has(a)"
 UC_HAS_NEW = b"self.localStorage?.getItem(a)   !=null"
 UC_ADD_OLD = b"this.sessionInjectedUserContext.add(a)"
@@ -279,35 +314,8 @@ CSTAT_OLD = b"x=renderConnectorStatusBlock(o);x.length>0&&ee.push("
 CSTAT_NEW = b"x=r?0:renderConnectorStatusBlock(o);x[0]  &&ee.push("
 
 
-def _pairs_user_context_once(data):
-    """把「首轮一次」的判据从进程内存搬到磁盘，并让 connector-status 也守同一判据。"""
-    pairs = [
-        (UC_HAS_OLD, UC_HAS_NEW),
-        (UC_ADD_OLD, UC_ADD_NEW),
-        (CSTAT_OLD, CSTAT_NEW),
-    ]
-    out = []
-    for old, new in pairs:
-        if len(old) != len(new):
-            raise ValueError("user-context-once 不等长：%d vs %d" % (len(old), len(new)))
-        hit = data.count(old)
-        if hit == 1:
-            out.append((old, new))
-        elif data.count(new) != 1:
-            raise ValueError("user-context-once 锚点命中 %d 次：%r" % (hit, old[:40]))
-    return out
-
-
-# ---- user-context 判据落盘（2026-11-21）------------------------------------
-# 为什么再加一条：`user-context-once` 把判据写进 renderer 的 localStorage，
-# 实测**从未生效**——那个 bundle 里 localStorage 并不存在（自带的 8 处用法全被
-# `typeof localStorage<'u'` 或 try/catch 保护），`self.localStorage?.` 静默 no-op，
-# 于是 alreadyInjectedUserContext 在真实请求里 53/53 全是 false（11/18–11/21 日志，
-# `compose project context` 行）。真正挡住重复注入的只有内存判据
-# `hasPriorUserMessages`，它在 CLI 运行时被重建时会翻回 false（11/18 21:38
-# 同一 pid 的 c321390f / ed8f24b4 / 6bc1b8d4 都出现了 true→false）。
-#
-# 这条补丁把判据放到**主进程 + 磁盘**：composeUserPrompt 里同步读写
+# ---- user-context 判据落盘（2026-11-21，2026-11-22 加固）---------------------
+# 把判据放到**主进程 + 磁盘**：composeUserPrompt 里同步读写
 # `<configDir>/uc-seen/<sessionId>`，与原标志取或（r=r||…），
 # 跨进程、跨工作区、跨重启都成立。util 是 h.a()（runtime-context2 的
 # getWorkbuddyRuntimeConfigDir），fs 已在本文件顶部绑成 O。
@@ -315,131 +323,300 @@ def _pairs_user_context_once(data):
 # 已知取舍：/clear 走 `isClearSession===!0` 提前 return，标记不会被清，
 # 所以同一 sessionId 清空对话后不再重注一次；桌面端「新对话」是新 sessionId，
 # 不受影响。要清就删 `~/.workbuddy/uc-seen/<sessionId>`（见 scripts/uc-seen.py）。
+#
+# 加固（P7）：旧补丁体 `try{…}catch{}` 把 h/O 改名后的 ReferenceError 整个吞掉，
+# 运行时零痕迹、--status 仍然报 patched。新补丁体：
+#   * 仍然整段包在 try/catch 里（绝不让补丁自身把 composeUserPrompt 弄挂）；
+#   * catch 里 call console.error(x) —— 失败在客户端日志里可见；
+#   * 语句压缩到 142 字节，与旧补丁体**严格等长**，因此既能给原始 bundle 打，
+#     也能给已经打过旧补丁的安装原地升级（旧体 → 新体，一次等长替换）。
+# 说明：h.a() / O 仍是压缩后的模块绑定，单靠字节预算做不到完全摆脱；但改名
+# 现在会在运行时打出错误，而 --status 也要求「新补丁体 + mkdirSync 调用」双条件，
+# 不会再出现「静默失效还报 patched」。
 UC_SEEN_ANCHOR = b"this.logger.info(`[WorkbuddyUserPromptService] compose project context "
 UC_SEEN_TAIL = b"isAskLike:isAskLikeMode(n,e.desiredConfig)});"
+UC_SEEN_BODY_OLD = (b"try{let ucd=h.a()+`/uc-seen/`;O.mkdirSync(ucd,{recursive:!0}),"
+                    b"r=r||O.existsSync(ucd+e.sessionId),O.writeFileSync(ucd+e.sessionId,`1`)}catch{};")
+# **严格 142 字节**，与旧补丁体逐字节等长 —— 真实安装里旧体后面紧跟
+# `this.logger…`，没有任何空白可供回收，所以等长是能否原地升级的硬前提。
+#
+#   `r||=…`              逻辑或赋值（Node 15+ / Chromium 85+），比 `r=r||…` 省 4 字节
+#   `{recursive:!0}`     必须是 **boolean true**：Node 24 对 `{recursive:1}` 抛
+#                        ERR_INVALID_ARG_TYPE（"must be of type boolean"），
+#                        补丁会被 catch 静默吞掉、标记永不落盘
+#   `catch(x){console.error(x)}`
+#                        整段包住，失败时 console.error 留痕（P7）。变量名必须是
+#                        `x`：用 `e` 会遮蔽外层 composeUserPrompt 的 `e.sessionId`。
+#   `u` 是目录，`f` 是文件     两者必须分开：把文件全路径传给 mkdirSync 会建出
+#                        同名目录，writeFileSync 随即 EISDIR——标记永远写不成。
+#                        这个坑是实测出来的（Node 24 fs），不是理论推导。
+#   `writeFileSync(f,```)      写入空字符串。判据只看"文件是否存在"，内容无关；
+#                        这比 `` `1` `` 省 2 字节，正好把加固后的长度压回 142。
+UC_SEEN_BODY_NEW = (b"try{let u=h.a()+`/uc-seen/`,f=u+e.sessionId;O.mkdirSync(u,{recursive:!0}),"
+                    b"r||=O.existsSync(f),O.writeFileSync(f,``)}catch(x){console.error(x)}")
+# 将来新体万一又变长：只要后面有尾随空白就能对齐；没有就让这条补丁 skipped，
+# 绝不硬写（_fit_replacement 的契约）。
+UC_SEEN_BODY_SLACK = 8
 CSTAT_PROJ_OLD = b"i=renderConnectorStatusBlock(o);i.length>0&&"
 CSTAT_PROJ_NEW = b"i=r?0:renderConnectorStatusBlock(o);i[0]  &&"
 
+_UC_DELTA = len(UC_SEEN_BODY_NEW) - len(UC_SEEN_BODY_OLD)
+if _UC_DELTA > UC_SEEN_BODY_SLACK:  # 差额必须能靠尾随空白补回来
+    raise AssertionError("uc-durable 新补丁体比旧体长 %d 字节，超过可回收的 %d 字节空白"
+                         % (_UC_DELTA, UC_SEEN_BODY_SLACK))
+
+
+_JS_BLANK = (b" ", b"\n", b"\t", b"\r")
+
+
+def _fit_replacement(data, start, end, new_body):
+    """在 data[start:end] 上构造一个与 new_body **等长**的替换。
+
+    新体比旧体短：尾部补空格（与旧补丁的做法一致，JS 里空白无语义）。
+    新体比旧体长：把 [end, …) 里紧邻的空白一起算进 old，并把同样多的空白补在
+    new 尾部 —— 总长都等于 (end-start)+delta，严格等长。空白不够就抛 ValueError
+    （宁可让这条补丁 skipped，也不去动非空白字节）。
+
+    返回 (old_bytes, new_bytes)，两者长度相同。
+    """
+    delta = len(new_body) - (end - start)
+    if delta <= 0:
+        return bytes(data[start:end]), new_body + b" " * (-delta)
+    j = end
+    while j < len(data) and (j - end) < delta and data[j:j + 1] in _JS_BLANK:
+        j += 1
+    if (j - end) != delta:
+        raise ValueError("uc-durable 新补丁体多出 %d 字节，后面只有 %d 字节空白可回收"
+                         % (delta, j - end))
+    # old 扩了 delta 字节（那些空白本就无语义），new 就是 new_body 本身：
+    # 两者长度都是 (end-start)+delta，严格等长。
+    return bytes(data[start:j]), new_body
+
+
+def uc_seen_patched(data):
+    """P7 双条件：新补丁体在位 **且** 补丁体里确实有 mkdirSync 调用。
+
+    只查 `/uc-seen/` 会把旧版静默补丁体（catch{}）也算成 patched；只查
+    字符串则可能被别处的同名常量误导。两个都满足才算真的生效形态。
+    """
+    return (UC_SEEN_BODY_NEW in data
+            and b"mkdirSync(" in UC_SEEN_BODY_NEW   # 常量自检：防止改体时漏掉调用
+            and CSTAT_PROJ_NEW in data)
+
 
 def _pairs_user_context_durable(data):
-    """在 composeUserPrompt 里插入磁盘标记：读 → 取或给 r → 写。"""
+    """在 composeUserPrompt 里插入磁盘标记：读 → 取或给 r → 写。
+
+    三种输入形态都处理：
+      1. 原始 bundle           → 整段（body+log+gate）等长替换；
+      2. 打过旧补丁体的安装     → 只把 142 字节旧体换成新体（P7 升级路径）；
+      3. 只有项目分支 cstat 没打 → 单独补那一段。
+    """
     pairs = []
-    i = data.find(UC_SEEN_ANCHOR)
-    if i >= 0:
-        j = data.find(b"logMemoryIndexComposeGate({", i)
-        if j < 0:
-            raise ValueError("uc-durable：找不到 logMemoryIndexComposeGate 调用")
-        end = data.find(UC_SEEN_TAIL, j)
-        if end < 0:
-            raise ValueError("uc-durable：gate 调用尾部锚点缺失")
-        end += len(UC_SEEN_TAIL)
-        old = bytes(data[i:end])
-        new = (
-            b"try{let ucd=h.a()+`/uc-seen/`;O.mkdirSync(ucd,{recursive:!0}),"
-            b"r=r||O.existsSync(ucd+e.sessionId),O.writeFileSync(ucd+e.sessionId,`1`)}catch{};"
-            b"this.logger.info(`[WorkbuddyUserPromptService] compose project context "
-            b"${JSON.stringify({sessionId:e.sessionId,alreadyInjectedUserContext:r})}`);"
-            b"this.logMemoryIndexComposeGate({sessionId:e.sessionId,"
-            b"hasPriorUserMessages:e.hasPriorUserMessages===!0,alreadyInjectedUserContext:r,"
-            b"isAskLike:isAskLikeMode(n,e.desiredConfig)});"
-        )
-        if len(new) > len(old):
-            raise ValueError("uc-durable 预算不够：%d > %d" % (len(new), len(old)))
-        pairs.append((old, new + b" " * (len(old) - len(new))))
-    n = data.count(CSTAT_PROJ_OLD)
-    if n == 1:
-        pairs.append((CSTAT_PROJ_OLD, CSTAT_PROJ_NEW))
-    elif data.count(CSTAT_PROJ_NEW) != 1:
-        raise ValueError("uc-durable：项目分支 connector-status 锚点命中 %d 次" % n)
+    if UC_SEEN_BODY_NEW not in data:
+        if UC_SEEN_BODY_OLD in data:
+            # 旧补丁体 → 新补丁体，逐字节等长（都是 142），原地升级。
+            pairs.append((UC_SEEN_BODY_OLD, UC_SEEN_BODY_NEW))
+        else:
+            i = data.find(UC_SEEN_ANCHOR)
+            if i < 0:
+                raise ValueError("uc-durable：找不到 compose project context 日志锚点")
+            j = data.find(b"logMemoryIndexComposeGate({", i)
+            if j < 0:
+                raise ValueError("uc-durable：找不到 logMemoryIndexComposeGate 调用")
+            end = data.find(UC_SEEN_TAIL, j)
+            if end < 0:
+                raise ValueError("uc-durable：gate 调用尾部锚点缺失")
+            end += len(UC_SEEN_TAIL)
+            new = (
+                UC_SEEN_BODY_NEW + b";"
+                b"this.logger.info(`[WorkbuddyUserPromptService] compose project context "
+                b"${JSON.stringify({sessionId:e.sessionId,alreadyInjectedUserContext:r})}`);"
+                b"this.logMemoryIndexComposeGate({sessionId:e.sessionId,"
+                b"hasPriorUserMessages:e.hasPriorUserMessages===!0,alreadyInjectedUserContext:r,"
+                b"isAskLike:isAskLikeMode(n,e.desiredConfig)});"
+            )
+            # 整段区间替换：原始 bundle 的这个区间比新内容长得多，直接用 _fit_replacement
+            # 统一处理（多余字节以空格补回，全落在 JS 语句之间）。
+            old, new = _fit_replacement(data, i, end, new)
+            pairs.append((old, new))
+    if CSTAT_PROJ_NEW not in data:
+        n = data.count(CSTAT_PROJ_OLD)
+        if n == 1:
+            pairs.append((CSTAT_PROJ_OLD, CSTAT_PROJ_NEW))
+        elif n != 0:
+            raise ValueError("uc-durable：项目分支 connector-status 锚点命中 %d 次" % n)
+        elif UC_SEEN_BODY_NEW not in data:
+            raise ValueError("uc-durable：项目分支 connector-status 锚点缺失")
     return pairs
 
 
-# 文本补丁注册表：每条都是**等长**替换，可独立回滚
+# 文本补丁注册表：每条都是**等长**替换，可独立回滚。
+#
+# core  = 入口清洗 / 云下发阻断。缺一条就等于没打，锚点失配必须整体拒绝（exit 2）。
+# aux   = 其余瘦身补丁。锚点失配只跳过自己，core 与可用的 aux 照常写入（exit 0 + WARN）。
+#
+# targets：--status 时按这些 asar 内路径（fnmatch 通配）校验 entry integrity。
+# 原来只校验 current_time 所在 entry，scene-chip 改的 renderer bundle 没人看，
+# renderer 那份 integrity 坏了 `--status` 也照样绿灯。
 PATCHES = [
     {
         "name": "current-time",
+        "core": True,
         "title": "去掉每轮注入的 <current_time> 块",
         "fn": _pairs_current_time,
         "applied": lambda d: b"*/],i=renderPanelTabsContext" in d,
+        "targets": [],  # 由 locate_target() 动态定位（raw/patched 两种形态）
     },
     {
         "name": "current-time-cloud",
+        "core": True,
         "title": "current_time 不再发给云端 resolveMessage（additional-data 块的上游）",
         "fn": _pairs_current_time_cloud,
         "applied": lambda d: b"0            &&(r.current_time=t.currentTime)" in d,
+        "targets": ["/main/server.js"],
     },
     {
         "name": "user-info",
+        "core": False,
         "title": "user_info：去 OS/主题/Time（Time 会破坏前缀缓存），Shell 兜底写明 Git Bash",
         "fn": _pairs_user_info,
         "applied": lambda d: b"<user_info>" in d and b"`Time: ${new Date()" not in d,
+        "targets": ["/main/connector-harness-marketplace.js"],
     },
     {
         "name": "connector-status",
+        "core": False,
         "title": "去掉 <connector-status> 里三句重连说明",
         "fn": _pairs_connector,
         "applied": lambda d: b"<connector-status>" in d and b"For an upstream authentication failure" not in d,
+        "targets": ["/main/connector-harness-marketplace.js"],
     },
     {
         "name": "project-layout",
+        "core": False,
         "title": "去掉 <project_layout> 内层标签（保留目录树）",
         "fn": _pairs_project_layout,
-        "applied": lambda d: b"<project_layout>" not in d,
+        # 同 scene-chip：只看"标签不在"会把"新版本压根没用这个标签"误判成已打过。
+        # 补丁的产物是 `let n=[/*` / `n.push(/*`（原标签位置被换成注释），
+        # 用正面标记一起判。
+        "applied": lambda d: (b"<project_layout>" not in d
+                              and b"let n=[/*" in d and b"n.push(/*" in d),
+        "targets": ["/main/connector-harness-marketplace.js"],
     },
     {
         "name": "project-context-once",
+        "core": False,
         "title": "project_context 回到「首轮一次」（不再每轮都带目录快照）",
         "fn": _pairs_project_context,
         "applied": lambda d: b"ProjectContextSection=class{constructor(){this.stage=`first_turn`}" in d,
+        "targets": ["/main/connector-harness-marketplace.js"],
     },
     {
         "name": "scene-chip",
+        "core": False,
         "title": "场景引用 @scene#… 不再序列化进消息文本",
         "fn": _pairs_scene_chip,
-        "applied": lambda d: SCENE_MAIN_OLD not in d and SCENE_RENDERER_OLD not in d,
-    },
-    {
-        "name": "user-context-once",
-        "title": "user-context 只在首轮注入：判据从进程内存搬到 localStorage，并把 connector-status 纳入同一判据",
-        "fn": _pairs_user_context_once,
-        "applied": lambda d: (b"self.localStorage?.getItem(a)" in d
-                              and b"self.localStorage?.setItem(a,`1`" in d
-                              and b"x=r?0:renderConnectorStatusBlock(o)" in d),
+        # 判据不能只看"原文不在"——新版本重写这段逻辑（既没有原文、也没有本补丁
+        # 的形态）会被误判成"已打过"，于是主流程跳过它、--status 还报 patched。
+        # 补丁的产物是两个 `return{text:``}`（原来那段被换成空文本 + 注释），
+        # 用正面标记 + 原文不在，两条同时成立才算 patched。
+        "applied": lambda d: (SCENE_MAIN_OLD not in d and SCENE_RENDERER_OLD not in d
+                              and d.count(b"return{text:``}") >= 2),
+        # 两处副本：主进程拼 prompt 用 /main/account.js，输入框序列化用 renderer 的
+        # common-<hash>.js（名字随构建变）。renderer 那个用内容标记锁定：同目录另外
+        # 6 个 common-*.js 与这条补丁无关。两组标记分别覆盖补丁前后形态：
+        #   raw     —— `encodeInlineBadgeValue`（只有这个 bundle 有）；
+        #   patched —— `return{text:``}`（补丁把整段换成它 + 注释，全库仅此 1 处）。
+        # 实测 `e.uri.startsWith(` 太通用（无关的 common-THF5HTIS.js 里 18 处），
+        # 会把别人的 bundle 也算进来，所以不用它当标记。
+        "targets": ["/main/account.js",
+                    ("/renderer/assets/common-*.js",
+                     [b"encodeInlineBadgeValue", b"return{text:``}"])],
     },
     {
         "name": "user-context-durable",
+        "core": False,
         "title": "user-context 判据落盘：composeUserPrompt 读写 <configDir>/uc-seen/<sessionId>，项目分支的 connector-status 也守同一判据",
         "fn": _pairs_user_context_durable,
-        "applied": lambda d: (b"/uc-seen/" in d
-                              and b"i=r?0:renderConnectorStatusBlock(o);i[0]  &&" in d),
+        "applied": uc_seen_patched,
+        "targets": ["/main/connector-harness-marketplace.js"],
     },
 ]
 
 
+def _probe_patch(spec, data):
+    """这条补丁在本构建里能不能打：返回 (pairs, error)。
+
+    pairs 为空 = 找不到锚点（本构建形态变了）；error 非空 = 锚点形态异常。
+    两者对 aux 都只跳过，对 core 都拒绝写入。
+    """
+    try:
+        return spec["fn"](data), None
+    except ValueError as e:
+        return [], str(e)
+
+
 def collect_content_edits(data):
-    """返回 (edits, done_names, missing_names)，edits 为 [(abs_offset, old, new)]。"""
+    """返回 (edits, done, missing_core, missing_aux)。
+
+    edits 为 [(abs_offset, old, new)]；missing_* 为 [(name, reason)]。
+    单条 aux 的锚点异常不会连累其它补丁（F-07 的"一损俱损"）。
+    """
     edits, done, missing = [], [], []
     for spec in PATCHES:
         if spec["applied"](data):
             done.append(spec["name"])
             continue
-        pairs = spec["fn"](data)
+        pairs, err = _probe_patch(spec, data)
         if not pairs:
-            missing.append(spec["name"])
+            missing.append((spec["name"], err or "锚点缺失（本构建代码形态变了）"))
             continue
+        ok = True
+        local = []
         for old, new in pairs:
             if len(old) != len(new):
-                raise ValueError("%s 替换不等长：%d → %d" % (spec["name"], len(old), len(new)))
+                err = "替换不等长：%d → %d" % (len(old), len(new))
+                ok = False
+                break
             hit = data.count(old)
             if hit != 1:
-                raise ValueError("%s 锚点命中 %d 次（应为 1）：%r" % (spec["name"], hit, old[:60]))
-            edits.append((data.find(old), old, new))
+                err = "锚点命中 %d 次（应为 1）：%r" % (hit, old[:60])
+                ok = False
+                break
+            local.append((data.find(old), old, new))
+        if not ok:
+            missing.append((spec["name"], err))
+            continue
+        edits.extend(local)
         done.append(spec["name"])
-    return edits, done, missing
+    missing_core = [(n, r) for n, r in missing if _spec(n)["core"]]
+    missing_aux = [(n, r) for n, r in missing if not _spec(n)["core"]]
+    return edits, done, missing_core, missing_aux
+
+
+def _spec(name):
+    return next(s for s in PATCHES if s["name"] == name)
 
 
 def patch_states(data):
-    return [(spec["name"], "patched" if spec["applied"](data) else "raw") for spec in PATCHES]
+    """逐条状态：patched / raw / skipped。
+
+    skipped = 本构建里连锚点都没有（aux 补丁被降级跳过），与"能打但还没打"的
+    raw 区分开。core 补丁缺锚点时报 `missing`（沿用 deploy.ps1 已在匹配的
+    `raw|missing` 判据，不会因为改名 skipped 而漏判成通过）。
+    """
+    out = []
+    for spec in PATCHES:
+        if spec["applied"](data):
+            out.append((spec["name"], "patched"))
+            continue
+        pairs, _err = _probe_patch(spec, data)
+        if pairs:
+            out.append((spec["name"], "raw"))
+        else:
+            out.append((spec["name"], "missing" if spec["core"] else "skipped"))
+    return out
 
 
 def parse_header(data):
@@ -618,19 +795,92 @@ def default_exe_for(asar):
     return exact  # 不存在时保留路径，交给上层报错（信息里带全路径）
 
 
-def exe_write_blocked(exe_path):
-    """能不能写 exe。运行中的 exe 是镜像映射，写会被拒；直接试一次比查进程名可靠
-    （复制到别处的副本同名但不锁，按名字判断会误报）。"""
-    if not os.path.isfile(exe_path):
-        return False
+# WinError 语义（P3）
+# ----------------
+# 5  (ERROR_ACCESS_DENIED)      = 权限不够 → 需要管理员，exit 3
+# 32 (ERROR_SHARING_VIOLATION)  = 文件被别的进程独占/镜像锁定 → 应用在运行，exit 4
+# 33 (ERROR_LOCK_VIOLATION)     = 区域锁冲突 → 同上，按"在运行"处理
+# 其余（杀软/EDR 偶发 1/87/… ）保守当作"被占用"，宁可让用户去关应用。
+WINERROR_ACCESS_DENIED = 5
+WINERROR_SHARING_VIOLATION = 32
+WINERROR_LOCK_VIOLATION = 33
+# Python 的 io 层在 Windows 上常常只给 errno=13、不给 winerror（实测 conda 3.12：
+# `open(...,"r+b")` 被拒时 `e.winerror` 是 None）。所以还要走一次 CreateFileW，
+# 直接拿系统错误码，不能只靠异常对象。
+_ACCESS_DENIED_ERRNOS = {13, 1}  # EACCES, EPERM
+
+
+def probe_open_error(path, write=True):
+    """试开一次目标文件，返回 Windows 错误码（0 = 可写）。
+
+    Python 的 `open()` 把 WinError 5 和 32 都折叠成 `PermissionError(13)`，
+    光看异常分不出「要提权」还是「应用在跑」。这里用 CreateFileW 拿原始
+    GetLastError：这是唯一能可靠区分两者的地方（且不写任何字节——
+    dwDesiredAccess=GENERIC_WRITE 但 CreateFileW 本身不写内容）。
+    """
+    if os.name != "nt":
+        try:
+            with open(path, "r+b" if write else "rb") as f:
+                f.seek(0)
+            return 0
+        except PermissionError:
+            return WINERROR_ACCESS_DENIED
+        except OSError:
+            return WINERROR_SHARING_VIOLATION
     try:
-        with open(exe_path, "r+b") as f:
-            f.seek(0)
-        return False
-    except PermissionError:
-        return True
+        import ctypes
+        from ctypes import wintypes
     except Exception:
-        return True
+        return WINERROR_SHARING_VIOLATION  # 判断不了就保守当占用
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = k32.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    access = 0x40000000 if write else 0x80000000  # GENERIC_WRITE / GENERIC_READ
+    share = 0 if write else 3                     # 写探测不共享：能暴露真实占用
+    # OPEN_EXISTING=3, FILE_ATTRIBUTE_NORMAL=0x80
+    handle = create(path, access, share, None, 3, 0x80, None)
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
+        return ctypes.get_last_error() or k32.GetLastError() or WINERROR_SHARING_VIOLATION
+    k32.CloseHandle(handle)
+    return 0
+
+
+def write_probe(path):
+    """返回 (blocked, reason)：reason ∈ {"locked", "denied", "error:…", None}。
+
+    locked → 应用在运行（exit 4）；denied → 需要管理员（exit 3）。
+    """
+    if not os.path.isfile(path):
+        return False, None
+    winerror = probe_open_error(path, write=True)
+    if winerror == 0:
+        return False, None
+    if winerror in (WINERROR_SHARING_VIOLATION, WINERROR_LOCK_VIOLATION):
+        return True, "locked"
+    if winerror == WINERROR_ACCESS_DENIED:
+        # 只读属性 / ACL 拒绝：不是"应用在跑"，而是权限问题。
+        return True, "denied"
+    # 其它错误码：保守当作被占用（可能是 EDR 拦截），但仍把原码打出来。
+    return True, "error:%d" % winerror
+
+
+def exe_write_blocked(exe_path):
+    """能不能写 exe。运行中的 exe 是镜像映射，写会被拒绝；直接试一次比查进程名可靠
+    （复制到别处的副本同名但不锁，按名字判断会误报）。
+
+    注意：返回 True 只表示"写不了"，不表示"应用在运行"——调用方必须用
+    `exe_write_denied()` / `write_probe()` 区分 exit 4 与 exit 3。
+    """
+    blocked, _reason = write_probe(exe_path)
+    return blocked
+
+
+def exe_write_denied(path):
+    """True = 写被拒是权限问题（需要管理员），而不是应用占用。"""
+    blocked, reason = write_probe(path)
+    return blocked and reason == "denied"
 
 
 def launch_app(exe_path):
@@ -667,17 +917,24 @@ def maybe_launch(exe_path, enabled=True):
 
 
 def file_locked(path):
-    """能不能写这个文件（asar 也是被镜像映射的，运行中写不进去）。"""
-    if not os.path.isfile(path):
-        return False
-    try:
-        with open(path, "r+b") as f:
-            f.seek(0)
-        return False
-    except PermissionError:
-        return True
-    except Exception:
-        return True
+    """asar 能不能写（运行中的 asar 是被镜像映射的）。
+
+    返回 True 只表示"写不了"；要区分"应用在运行"与"需要管理员"，
+    用 `write_denied(path)`（P3）。
+    """
+    blocked, _reason = write_probe(path)
+    return blocked
+
+
+def write_denied(path):
+    """True = 写不进去的原因是权限不足（WinError 5），不是应用占用。"""
+    blocked, reason = write_probe(path)
+    return blocked and reason == "denied"
+
+
+def write_block_reason(path):
+    """给错误信息用：None / "locked" / "denied" / "error:<n>"。"""
+    return write_probe(path)[1]
 
 
 PROC_SCRIPT = (r"Get-CimInstance Win32_Process | "
@@ -722,17 +979,47 @@ def report_running(procs, action):
 
 
 def exe_manifest_hashes(exe_path):
-    with open(exe_path, "rb") as f:
+    with open_for_read(exe_path) as f:
         blob = f.read()
     return [m.group(1).decode("ascii") for m in APP_ASAR_ENTRY_RE.finditer(blob)]
+
+
+class TargetBusy(Exception):
+    """读目标文件时它被独占打开（WinError 32/33）。运行中的 exe 就是这种状态。
+
+    单独建异常类型，是为了让上层能把它翻译成 exit 4（应用在运行），而不是
+    exit 1（未分类失败）。之前 `open(exe,"rb")` 在独占锁下抛 PermissionError，
+    被 `except Exception` 收进"exe 清单处理失败 → exit 1"，用户既看不到
+    "正在运行"也拿不到正确退出码。
+    """
+
+
+class TargetDenied(Exception):
+    """读目标文件时被拒绝（WinError 5）。需要管理员，对应 exit 3。"""
+
+
+def open_for_read(path):
+    """读目标文件的统一入口：把 OS 错误翻译成 TargetBusy / TargetDenied。"""
+    try:
+        return open(path, "rb")
+    except (PermissionError, OSError) as e:
+        winerror = getattr(e, "winerror", None)
+        if winerror is None:
+            winerror = probe_open_error(path, write=False)
+        if winerror in (WINERROR_SHARING_VIOLATION, WINERROR_LOCK_VIOLATION):
+            raise TargetBusy(str(e))
+        if winerror == WINERROR_ACCESS_DENIED:
+            raise TargetDenied(str(e))
+        raise
 
 
 def plan_exe_manifest_sync(exe_path, desired_hash):
     """把 exe 清单里 resources\\app.asar 的 value 同步到 desired_hash。
 
     返回 (edits, total_entries)。edits 为 [(abs_offset, old_bytes, new_bytes), …]。
+    读不到时抛 TargetBusy / TargetDenied（见上），由调用方翻译成 exit 4 / 3。
     """
-    with open(exe_path, "rb") as f:
+    with open_for_read(exe_path) as f:
         blob = f.read()
     matches = list(APP_ASAR_ENTRY_RE.finditer(blob))
     if not matches:
@@ -766,20 +1053,74 @@ def read_back(path, edits):
     return True
 
 
-def check_integrity(asar, abs_offset):
-    """重新解析落盘后的 asar，断言 entry integrity 与实际内容一致。"""
+def revert_written(path, edits):
+    """只回退**确实已经落盘**的编辑，返回 (reverted, failed)。
+
+    为什么不是一个 `write_edits(path, 逆编辑)`：写盘可能在中间失败（磁盘满、
+    杀软中断、句柄被撤），此时只有前几处落地了。整份逆编辑会去写那些本来
+    就没改过的位置，既扩大风险面，也可能在"写不了"的同一原因下再次失败，
+    于是回滚看起来失败、其实早先那几处已经改坏了。
+
+    逐条检查"这个位置现在是不是新值"：是才写回旧值。没写过的一律不碰。
+    """
+    if not edits:
+        return 0, 0
+    reverted = failed = 0
+    try:
+        fh = open(path, "r+b")
+    except OSError:
+        return 0, len(edits)
+    with fh:
+        for off, old, new in edits:
+            try:
+                fh.seek(off)
+                cur = fh.read(len(new))
+                if cur != new:      # 没写进去 / 已被别人改回：不动它
+                    continue
+                fh.seek(off)
+                fh.write(old)
+                reverted += 1
+            except OSError as e:
+                failed += 1
+                print("!! 回退 offset %d 失败：%s" % (off, e))
+        try:
+            fh.flush()
+            os.fsync(fh.fileno())
+        except OSError:
+            pass
+    return reverted, failed
+
+
+def check_integrity(asar, abs_offset=None, rel_path=None):
+    """重新解析落盘后的 asar，断言 entry integrity 与实际内容一致。
+
+    两种定位方式：
+      * `abs_offset` —— 承载该绝对偏移的文件（写完后按 site 校验）；
+      * `rel_path`   —— asar 内的 entry 路径（`--status` 按补丁声明的 targets
+        校验，连 renderer bundle 也能覆盖，P8）。
+
+    返回 (ok, msg)：ok 为 True/False/None（None = 该 entry 没有 integrity，跳过）。
+    """
     with open(asar, "rb") as f:
         head = f.read(16)
         pickle_size = struct.unpack("<I", head[4:8])[0]
         f.seek(0)
         blob = f.read(8 + pickle_size)
         info = parse_header(blob)
-        rel, entry = find_entry(info["header"], info["data_off"], abs_offset)
-        if not entry:
-            return None, "没定位到承载文件"
+        if rel_path is not None:
+            rel, entry = find_entry_by_path(info["header"], rel_path)
+            if entry is None:
+                return None, "%s 不在 asar 里" % rel_path
+        else:
+            rel, entry = find_entry(info["header"], info["data_off"], abs_offset)
+            if not entry:
+                return None, "没定位到承载文件"
+        if entry.get("unpacked") or entry.get("offset") is None:
+            # asar.unpacked 里的文件没有 offset/integrity，无从校验（也不是本脚本改的）
+            return None, "%s 是 unpacked entry，跳过" % rel
         integ = entry.get("integrity")
         if not integ:
-            return None, "entry 没有 integrity 字段"
+            return None, "%s 没有 integrity 字段" % rel
         _start, _end, obj = find_integrity_span(blob, info, entry)
         size = int(entry.get("size", 0))
         f.seek(info["data_off"] + int(entry["offset"]))
@@ -789,6 +1130,86 @@ def check_integrity(asar, abs_offset):
     calc_blocks = compute_block_hashes(content, block_size)
     ok = calc_hash == obj.get("hash") and calc_blocks == list(obj.get("blocks") or [])
     return ok, "%s hash=%s… blocks=%d" % (rel, calc_hash[:16], len(calc_blocks))
+
+
+def find_entry_by_path(header, rel_path):
+    """按 asar 内路径找 entry。路径统一用 `/` 开头的形式（与 walk_entries 一致）。"""
+    want = rel_path if rel_path.startswith("/") else "/" + rel_path
+    for rel, entry in walk_entries(header):
+        if rel == want:
+            return rel, entry
+    return None, None
+
+
+def match_entries(header, pattern, markers=None, asar=None):
+    """按 fnmatch 通配找 entry 路径。
+
+    P8 的现实约束：scene-chip 改的 renderer bundle 叫 `common-<hash>.js`，哈希
+    随构建变，只能用通配；但 `common-*.js` 一次匹配到 7 个文件，只有 1 个含场景
+    代码。所以再按 `markers`（内容标记）过滤——通配负责"文件名形态"，marker
+    负责"确实是那个 bundle"。
+
+    `markers` 是**任一命中即可**的列表：补丁前后 bundle 的内容不同（整段被换成
+    注释），所以 raw 形态与 patched 形态的标记都要给，否则打完补丁就找不到自己
+    改过的文件了。
+    """
+    want = pattern if pattern.startswith("/") else "/" + pattern
+    if markers is None:
+        markers = []
+    hits = []
+    for rel, entry in walk_entries(header):
+        if not fnmatch.fnmatchcase(rel, want):
+            continue
+        if markers:
+            if entry.get("unpacked") or entry.get("offset") is None or asar is None:
+                continue
+            content = read_entry_bytes(asar, header, entry)
+            if not any(m in content for m in markers):
+                continue
+        hits.append(rel)
+    return hits
+
+
+def read_entry_bytes(asar, header, entry):
+    """读出一个 entry 的原始内容（只在按 marker 过滤时用，单次 open）。"""
+    data_off = None
+    with open(asar, "rb") as f:
+        head = f.read(16)
+        pickle_size = struct.unpack("<I", head[4:8])[0]
+        data_off = 8 + pickle_size
+        f.seek(data_off + int(entry["offset"]))
+        return f.read(int(entry.get("size", 0)))
+
+
+def integrity_report(asar, header, patterns, seen=None):
+    """对一组 entry 通配跑 integrity 校验，返回 [(pattern, rel, ok, msg)]。
+
+    `ok is False` 才算失败；True = 匹配；None = 没 integrity 字段 / unpacked /
+    该构建没有匹配的 entry（这三种都不是"坏"，由调用方按补丁状态决定要不要提示）。
+
+    `seen` 可跨调用共享，避免多条补丁重复校验同一个 entry。
+    """
+    out = []
+    seen = set() if seen is None else seen
+    for pat in patterns:
+        if not pat:
+            continue
+        # 形态：字符串，或 (glob, [marker, …])
+        if isinstance(pat, tuple):
+            glob_pat, markers = pat
+        else:
+            glob_pat, markers = pat, None
+        hits = match_entries(header, glob_pat, markers=markers, asar=asar)
+        if not hits:
+            out.append((glob_pat, glob_pat, None, "该构建没有匹配的 entry"))
+            continue
+        for rel in hits:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            ok, msg = check_integrity(asar, rel_path=rel)
+            out.append((pat, rel, ok, msg))
+    return out
 
 
 def extract_containing_bundle(asar_path, abs_offset):
@@ -819,34 +1240,171 @@ def node_check(path):
     return p.returncode == 0, (p.stderr or p.stdout).strip()[:800]
 
 
-def backup_dir(asar_path):
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    d = os.path.join(BACKUP_ROOT, "%s-asar-current-time" % stamp)
+BACKUP_SUFFIX = "-asar-current-time"
+BACKUP_TMP_PREFIX = "tmp-"
+BACKUP_FAILED_PREFIX = "failed-"
+
+
+def now_stamp():
+    """备份时间戳：本地时间 ISO 秒 + 微秒。
+
+    只用秒的话，同一秒内连打两次（自测 / 部署脚本连跑两个 target）会得到
+    同一个 appliedAt，`latest_backup()` 的排序就退化成看目录名，可能挑错
+    那一层。带微秒后"谁更晚"是确定的。
+
+    用 time_ns() 而不是 `time.time()*1e6`：后者与 strftime 各自取一次系统
+    时间，跨秒边界时秒部分与微秒部分会来自不同的时刻。
+    """
+    ns = time.time_ns()
+    secs, rem = divmod(ns, 1_000_000_000)
+    return (time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(secs))
+            + (".%06d" % (rem // 1000)))
+# 明确的写入点：备份目录在这里改名/落 meta。自测可以换成临时目录。
+BACKUP_DIRNAME_RE = re.compile(r"^\d{8}-\d{6}" + re.escape(BACKUP_SUFFIX) + r"$")
+
+
+def backup_dir(asar_path, stamp=None):
+    """写盘前的**临时**备份目录（P4）。
+
+    以前这里直接建正式目录并写 meta，写盘失败/回滚后脏备份会留在 backups/ 里，
+    被 `latest_backup()` 选中（restore 会拿一个根本没生效的快照去还原）。
+    现在先落在 `tmp-<stamp>-asar-current-time`，只有写盘全部成功、回读 /
+    integrity / exe 清单 / 语法校验都通过之后才 `commit_backup()` 改名为正式名；
+    失败/回滚时 `discard_backup()` 删掉临时目录。
+    """
+    if stamp is None:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+    d = os.path.join(BACKUP_ROOT, "%s%s%s" % (BACKUP_TMP_PREFIX, stamp, BACKUP_SUFFIX))
     os.makedirs(d, exist_ok=True)
     return d
 
 
-def latest_backup(asar_path):
+def is_formal_backup_name(name):
+    """正式备份名：`YYYYMMDD-HHMMSS-asar-current-time`。
+
+    `tmp-` / `failed-` 前缀与任何手工目录都不算——`latest_backup()` 只认正式的。
+    """
+    if not name.endswith(BACKUP_SUFFIX):
+        return False
+    if name.startswith(BACKUP_TMP_PREFIX) or name.startswith(BACKUP_FAILED_PREFIX):
+        return False
+    return bool(BACKUP_DIRNAME_RE.match(name))
+
+
+def commit_backup(tmp_dir, meta=None):
+    """把临时备份目录转正（P4 的"提交"）。
+
+    先写 meta.json（含 shaAfter），再 os.replace 改名；改名是同一卷上的原子
+    操作，所以 `latest_backup()` 永远看不到"半个"正式备份。返回正式目录路径。
+    目标名已存在时加 -2/-3 后缀，绝不覆盖已有备份。
+    """
+    tmp_dir = os.path.abspath(tmp_dir)
+    base = os.path.basename(tmp_dir)
+    if base.startswith(BACKUP_TMP_PREFIX):
+        base = base[len(BACKUP_TMP_PREFIX):]
+    final = os.path.join(BACKUP_ROOT, base)
+    n = 1
+    while os.path.exists(final):
+        n += 1
+        final = os.path.join(BACKUP_ROOT, "%s-%d" % (base, n))
+    if meta is not None:
+        with open(os.path.join(tmp_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_dir, final)
+    return final
+
+
+def discard_backup(tmp_dir):
+    """失败/回滚时删掉临时备份目录。删不掉也不抛——只是留个 tmp- 目录，
+    而 tmp- 永远不会被 `latest_backup()` 选中。"""
+    if not tmp_dir:
+        return
+    if not os.path.basename(os.path.normpath(tmp_dir)).startswith(BACKUP_TMP_PREFIX):
+        return  # 只删自己建的临时目录，正式备份一个都不碰
+    try:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _backup_meta(d):
+    meta = os.path.join(d, "meta.json")
+    if not os.path.isfile(meta):
+        return None
+    try:
+        with open(meta, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def latest_backup(asar_path, current_sha=None):
+    """挑 restore 用的备份（P5：多次增量打补丁的备份链）。
+
+    规则（按优先级）：
+      1. `shaAfter` 与**当前 asar** 的 sha256 相同的**最新**备份 —— 这份备份正是
+         在"当前这个文件状态"上取下来的，它记录的 sites 偏移与 entry 内容对当前
+         文件有效，回滚它等于撤销最近一次改动。多次增量打补丁后，每层都有一份
+         这样的备份，恢复是逐层往回退，绝不会拿一份 offsets 已经错位的快照去写。
+      2. 没有匹配（应用升级过、asar 被替换、或只读运行查不到 sha）时，取**最旧**
+         的正式备份 —— 那是这条链上最初的原始 asar，用来兜底回原始版。
+      3. 任何 `tmp-` / `failed-` 前缀、缺 meta.json、meta 损坏的目录一律跳过。
+
+    为什么用 shaAfter 而不是 shaBefore：shaBefore 匹配意味着"这份备份就是从这个
+    状态开始打的"，此时回滚它是把 asar 写回它自己，纯 no-op；而且 restored 之后
+    sha 仍然等于 shaBefore，再跑一次 restore 还会选它，永远退不回去。shaAfter
+    匹配才能保证"每一步都往更早的状态走一步"。
+    """
     if not os.path.isdir(BACKUP_ROOT):
         return None
-    cands = []
+    rows = []
     for name in os.listdir(BACKUP_ROOT):
-        if not name.endswith("-asar-current-time"):
+        if not is_formal_backup_name(name):
             continue
-        meta = os.path.join(BACKUP_ROOT, name, "meta.json")
-        if not os.path.isfile(meta):
+        d = os.path.join(BACKUP_ROOT, name)
+        if not os.path.isdir(d):
             continue
-        try:
-            with open(meta, encoding="utf-8") as f:
-                m = json.load(f)
-        except Exception:
+        m = _backup_meta(d)
+        if not m:
             continue
-        if os.path.normcase(m.get("asar", "")) == os.path.normcase(asar_path):
-            cands.append((m.get("appliedAt", ""), name))
-    if not cands:
+        if os.path.normcase(m.get("asar", "")) != os.path.normcase(asar_path):
+            continue
+        rows.append((m.get("appliedAt", ""), name,
+                     str(m.get("shaAfter") or "").lower(), d))
+    if not rows:
         return None
-    cands.sort()
-    return os.path.join(BACKUP_ROOT, cands[-1][1])
+    rows.sort(key=lambda r: (r[0], r[1]))
+    if current_sha is None:
+        try:
+            current_sha = sha256_file(asar_path)
+        except OSError:
+            current_sha = ""
+    current_sha = (current_sha or "").lower()
+    if current_sha:
+        matches = [r for r in rows if r[2] and r[2] == current_sha]
+        if matches:
+            return matches[-1][3]          # 规则 1：与当前 sha 匹配的最新一份
+    return rows[0][3]                      # 规则 2：最旧（最初的原始备份）
+
+
+def backup_lineage(asar_path):
+    """诊断用：按时间列出这条备份链（--status 打印，便于人工确认 restore 会选谁）。"""
+    if not os.path.isdir(BACKUP_ROOT):
+        return []
+    rows = []
+    for name in sorted(os.listdir(BACKUP_ROOT)):
+        if not is_formal_backup_name(name):
+            continue
+        d = os.path.join(BACKUP_ROOT, name)
+        m = _backup_meta(d)
+        if not m:
+            continue
+        if os.path.normcase(m.get("asar", "")) != os.path.normcase(asar_path):
+            continue
+        rows.append((m.get("appliedAt", ""), name,
+                     str(m.get("shaBefore") or "")[:16], str(m.get("shaAfter") or "")[:16],
+                     str(m.get("shaAfter") or "").lower()))
+    return rows
 
 
 def status(data):
@@ -871,7 +1429,23 @@ def locate_target(data):
     return -1
 
 
+def _force_utf8_stdio():
+    """P9：输出统一走 UTF-8。
+
+    Windows 上 Python 的 stdout 默认跟控制台代码页（cp936）走，经 PowerShell
+    管道重定向时中文会被按错误编码解码成乱码。deploy.ps1 已经设了
+    PYTHONIOENCODING=utf-8，但手工运行时没有，所以脚本自己兜底。
+    reconfigure 失败（比如被替换成 StringIO）就静默跳过，不影响功能。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main():
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser()
     ap.add_argument("--asar", default=_install.find_asar(),
                     help="<安装目录>\\resources\\app.asar（省略时按 WORKBUDDY_INSTALL / targets.json 找）")
@@ -912,23 +1486,77 @@ def main():
         procs = running_workbuddy()
         if procs:
             print("running: %s" % ", ".join("%s(pid=%d)" % (n, p) for p, n, _e in procs))
-        for name, s in patch_states(data):
+        states = patch_states(data)
+        for name, s in states:
             print("patch:  %-17s %s" % (name, s))
         print("sha256: %s" % sha256_bytes(data))
+
+        # ---- P8：按补丁声明的 targets 校验 entry integrity ----
+        # 旧版只看 current_time 那个 entry；scene-chip 改的是 renderer 的
+        # common-*.js，它坏了 --status 也照样绿。
+        #
+        # 输出契约（deploy.ps1 / doctor.py 只认这一行）：
+        #   `integ: MATCH` 或 `integ: MISMATCH (…)` —— 单行、值以 MATCH 开头。
+        # 逐补丁明细放 `entry:` 行（两个消费者都不解析），失败时另打 `warn:`。
+        problems = []
+        unchecked = []
+        checked = 0
+        handled = set()
+        state_of = dict(states)
+        # entry -> 声明它的补丁（多条补丁共用同一个 bundle，展示时合并）
+        owners = {}
+        for spec in PATCHES:
+            patterns = spec.get("targets") or []
+            if not patterns:
+                continue
+            state = state_of.get(spec["name"])
+            for _pat, rel, ok, msg in integrity_report(asar, info["header"], patterns, seen=handled):
+                if not rel.startswith("/"):
+                    # 通配没匹配到任何 entry：补丁已 patched 才值得提示
+                    if state == "patched":
+                        unchecked.append(spec["name"])
+                    continue
+                owners.setdefault(rel, []).append(spec["name"])
+                if ok is None:
+                    # unpacked / 没 integrity 字段：不是"坏"，只是无从校验
+                    continue
+                checked += 1
+                if not ok:
+                    problems.append("%s %s" % (spec["name"], rel))
+                    print("warn:   %s 的 entry integrity 不匹配：%s" % (spec["name"], msg))
+        for rel, names in owners.items():
+            ok, msg = check_integrity(asar, rel_path=rel)
+            if ok is None:
+                print("entry:  %-52s integrity=%-10s %s" % (rel, "跳过", ", ".join(names)))
+            else:
+                print("entry:  %-52s integrity=%-10s %s"
+                      % (rel, "MATCH" if ok else "MISMATCH", ", ".join(names)))
+        if unchecked:
+            print("warn:   %s 报 patched，但本构建没有匹配 targets 的 entry"
+                  % ", ".join(unchecked))
+        # current-time 的目标段按 raw/patched 两种形态动态定位，不在 spec 里写死
         target = locate_target(data)
         if target >= 0:
             try:
                 rel, entry = find_entry(info["header"], info["data_off"], target)
-                if entry:
+                if entry and rel not in owners:
                     content_start = info["data_off"] + int(entry["offset"])
                     content = bytes(data[content_start:content_start + int(entry["size"])])
-                    integ = entry.get("integrity") or {}
-                    calc = sha256_bytes(content)
-                    stored = integ.get("hash")
-                    print("entry:  %s" % rel)
-                    print("integ:  %s" % ("MATCH" if stored == calc else "MISMATCH (%s vs %s)" % (calc[:16], (stored or "none")[:16])))
+                    stored = (entry.get("integrity") or {}).get("hash")
+                    good = stored == sha256_bytes(content)
+                    checked += 1
+                    print("entry:  %-52s integrity=%-10s %s" % (rel, "MATCH" if good else "MISMATCH", "current-time"))
+                    if not good:
+                        problems.append("current-time %s" % rel)
             except Exception as e:
-                print("integ:  无法检查（%s）" % e)
+                print("entry:  current-time 承载文件无法检查（%s）" % e)
+        if problems:
+            print("integ:  MISMATCH (%s)" % "; ".join(problems))
+        elif checked:
+            print("integ:  MATCH")
+        else:
+            print("integ:  跳过（该 asar 没有可校验的 integrity entry）")
+
         hh = header_sha(data, info)
         print("header: %s" % hh)
         if exe:
@@ -943,13 +1571,24 @@ def main():
                     print("exe sync: %s" % ("MATCH" if ok else "MISMATCH"))
                 except Exception as e:
                     print("exe:    无法检查（%s）" % e)
+        # 备份链（只读）：restore 会按 sha 匹配挑一份，人工核对时用得到
+        lineage = backup_lineage(asar)
+        if lineage:
+            print("backups: %d 份正式备份" % len(lineage))
+            chosen = latest_backup(asar, current_sha=sha256_bytes(data))
+            for row in lineage[-5:]:
+                name, before, after = row[1], row[2], row[3]
+                print("  %s%s  %s -> %s"
+                      % (name, "  <- restore 会选它" if chosen and name in chosen else "",
+                         before, after))
         return 0
 
     if args.restore:
-        d = latest_backup(asar)
+        d = latest_backup(asar, current_sha=sha256_bytes(data))
         if not d:
             print("没有找到 %s 的备份" % asar)
             return 2
+        print("backup:    %s" % d)
         with open(os.path.join(d, "meta.json"), encoding="utf-8") as f:
             meta = json.load(f)
 
@@ -995,6 +1634,15 @@ def main():
         if exe_path:
             try:
                 exe_edits, n_entries = plan_exe_manifest_sync(exe_path, want_header)
+            except TargetBusy as e:
+                print("!! WorkBuddy.exe 正在被使用（WorkBuddy 在运行）：%s" % e)
+                report_running(running_workbuddy(), "asar 还原")
+                print("   还原未执行（未改任何字节）。请完全退出 WorkBuddy 后重跑 scripts\\restore.cmd。")
+                return 4
+            except TargetDenied as e:
+                print("!! WorkBuddy.exe 读取被拒绝（需要管理员权限）：%s" % e)
+                print("   还原未执行（未改任何字节）。请以管理员身份重跑 scripts\\restore.cmd。")
+                return 3
             except Exception as e:
                 print("!! 还原 exe 清单失败：%s" % e)
                 return 1
@@ -1005,25 +1653,60 @@ def main():
             print("已经是原始状态，无需还原")
             return 0
 
-        if exe_edits and exe_path and (file_locked(asar) or exe_write_blocked(exe_path)):
-            print("!! WorkBuddy 正在运行，无法写 WorkBuddy.exe / app.asar；还原未执行（未改任何字节）。")
-            report_running(running_workbuddy(), "asar 还原")
-            print("   请完全退出 WorkBuddy（含托盘）后重跑 scripts\\restore.cmd。")
-            return 4
+        if exe_edits and exe_path:
+            # P3：先分清"应用在跑"（exit 4）与"没提权"（exit 3）
+            reason = write_block_reason(asar) or write_block_reason(exe_path)
+            if reason == "denied":
+                print("!! 写入被拒绝（需要管理员）：请以管理员身份重跑 scripts\\restore.cmd。")
+                print("   还原未执行（未改任何字节）。")
+                return 3
+            if reason:
+                print("!! WorkBuddy 正在运行，无法写 WorkBuddy.exe / app.asar；还原未执行（未改任何字节）。")
+                report_running(running_workbuddy(), "asar 还原")
+                print("   请完全退出 WorkBuddy（含托盘）后重跑 scripts\\restore.cmd。")
+                return 4
+
+        # P1 同类问题：restore 也是"asar 改了、exe 没改"就变砖，必须同事务。
+        def _restore_rollback(reason_text):
+            print("!! %s，回滚 restore" % reason_text)
+            try:
+                if exe_edits:
+                    write_edits(exe_path, [(off, new, old) for off, old, new in exe_edits])
+                if asar_edits:
+                    write_edits(asar, [(off, new, old) for off, old, new in asar_edits])
+            except Exception as e2:
+                print("!! 回滚写入失败：%s" % e2)
+                return False
+            try:
+                back = sha256_file(asar)
+            except OSError:
+                return False
+            print("   回滚后 asar sha256 %s" % back[:16])
+            return True
 
         try:
             if asar_edits:
                 write_edits(asar, asar_edits)
-            if exe_edits:
-                write_edits(exe_path, exe_edits)
-        except PermissionError as e:
-            print("写入被拒绝（需要管理员）: %s" % e)
+        except (PermissionError, OSError) as e:
+            print("!! asar 写入失败：%s" % e)
+            if not read_back(asar, asar_edits):
+                _restore_rollback("asar 写入中断")
+            print("   已尝试清理半写状态；若上一行不是 OK 请手工用备份还原。")
             return 3
+        if exe_edits:
+            try:
+                write_edits(exe_path, exe_edits)
+            except Exception as e:
+                print("!! exe 写入失败：%s" % e)
+                _restore_rollback("exe 写入失败（权限 / 被杀软拦截 / 被锁）")
+                print("   已回滚 asar，避免 integrity 失配。")
+                return 3
         if asar_edits and not read_back(asar, asar_edits):
             print("!! asar 回读不一致")
             return 1
         if exe_edits and not read_back(exe_path, exe_edits):
-            print("!! exe 回读不一致")
+            _restore_rollback("exe 回读不一致")
+            print("!! exe 回读不一致（已回滚）")
             return 1
         after = sha256_file(asar)
         ok = after == meta["shaBefore"]
@@ -1042,61 +1725,86 @@ def main():
         return 0 if (ok and exe_ok) else 1
 
     # ---- apply / dry-run ----
-    try:
-        content_edits, done, missing = collect_content_edits(data)
-    except ValueError as e:
-        print("!! 补丁锚点异常：%s" % e)
+    # P6 分级：core 缺锚点 = 整体拒绝（exit 2，一个字节不写）；
+    #          aux  缺锚点 = 只跳过它，其余照常写入（exit 0 + WARN）。
+    content_edits, done, missing_core, missing_aux = collect_content_edits(data)
+
+    if missing_core:
+        print("!! core 补丁的锚点在本版本里找不到：%s" % ", ".join(n for n, _r in missing_core))
+        print("   可能 WorkBuddy 升级改写了对应代码；本次不写入任何改动。")
+        for name, reason in missing_core:
+            print("   - %-17s %s" % (name, _spec(name)["title"]))
+            print("     reason: %s" % reason)
         return 2
 
-    if missing:
-        print("!! 本版本代码里找不到这些补丁的锚点：%s" % ", ".join(missing))
-        print("   可能 WorkBuddy 升级改写了对应代码；本次不写入任何改动。")
-        for name in missing:
-            spec = next(s for s in PATCHES if s["name"] == name)
-            print("   - %-17s %s" % (name, spec["title"]))
-        return 2
+    if missing_aux:
+        print("WARN: %d 条补丁未应用（锚点失配）：" % len(missing_aux))
+        for name, reason in missing_aux:
+            print("WARN:   - %-17s %s" % (name, _spec(name)["title"]))
+            print("WARN:     reason: %s" % reason)
+        print("WARN: core 补丁与其余 aux 照常应用；下面 --status 会把这些标成 skipped。")
 
     if not content_edits:
         # 内容补丁全部已在位；可能只是 exe 清单没同步（旧版脚本只改了头）
         hh = header_sha(data, info)
         print("already patched: %s" % ", ".join(done))
         print("header:  %s" % hh)
+        if missing_aux:
+            print("WARN: %d 条补丁未应用（锚点失配），其余已在位。" % len(missing_aux))
         if not exe:
             print("exe:     跳过（--no-exe）")
             return 0
         try:
             exe_edits, n_entries = plan_exe_manifest_sync(exe, hh)
+        except TargetBusy as e:
+            print("!! WorkBuddy.exe 正在被使用（WorkBuddy 在运行）：%s" % e)
+            report_running(running_workbuddy(), "exe 清单同步")
+            print("   请完全退出 WorkBuddy（含托盘）后重跑 scripts\\deploy.cmd -Asar。")
+            return 4
+        except TargetDenied as e:
+            print("!! WorkBuddy.exe 读取被拒绝（需要管理员权限）：%s" % e)
+            print("   请以管理员身份重跑 scripts\\deploy.cmd -Asar。")
+            return 3
         except Exception as e:
             print("!! exe 清单处理失败：%s" % e)
             return 1
         if not exe_edits:
             print("exe sync: MATCH（%d 处清单已是当前头哈希）" % n_entries)
             return 0
-        old_vals = exe_manifest_hashes(exe)
-        exe_sha_before = sha256_file(exe)
-        if exe_write_blocked(exe) or file_locked(asar):
+        # P3：先分清 exit 4（应用在跑）与 exit 3（需要管理员）
+        reason = write_block_reason(asar) or write_block_reason(exe)
+        if reason == "denied":
+            print("!! WorkBuddy.exe 写入被拒绝（需要管理员权限）：%s" % exe)
+            print("   本次未写入任何改动。请以管理员身份重跑 scripts\\deploy.cmd -Asar。")
+            return 3
+        if reason:
             print("!! WorkBuddy.exe 写不进去（WorkBuddy 正在运行，exe / asar 被镜像锁定）。")
             report_running(running_workbuddy(), "exe 清单同步")
             print("   请完全退出 WorkBuddy（含托盘）后重跑 scripts\\deploy.cmd -Asar。")
             return 4
+        old_vals = exe_manifest_hashes(exe)
+        exe_sha_before = sha256_file(exe)
         try:
             write_edits(exe, exe_edits)
-        except PermissionError as e:
+        except (PermissionError, OSError) as e:
             print("写入被拒绝（需要管理员）: %s" % e)
             return 3
         if not read_back(exe, exe_edits):
-            write_edits(exe, [(o, n, o) for o, o, n in exe_edits])
-            print("!! exe 回读不一致，已回滚")
+            # P2：这里以前写的是 `[(o, n, o) for o, o, n in exe_edits]`——
+            # 三个变量名只解出两个真实值，触发即 TypeError。对齐 rollback() 的写法。
+            try:
+                write_edits(exe, [(off, new, old) for off, old, new in exe_edits])
+                print("!! exe 回读不一致，已回滚")
+            except Exception as e2:
+                print("!! exe 回读不一致，且回滚失败：%s" % e2)
             return 1
-        d = latest_backup(asar)
-        if d:
-            with open(os.path.join(d, "meta.json"), encoding="utf-8") as f:
-                meta = json.load(f)
-        else:
-            d = backup_dir(asar)
-            meta = {"asar": asar, "offset": 0, "length": 0, "shaBefore": sha256_file(asar),
-                    "appliedAt": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            open(os.path.join(d, "segment.bin"), "wb").close()
+        # 只补 exe 清单也要留备份链：新建一份临时备份，成功后才转正（P4）
+        d = backup_dir(asar)
+        tmp_owner = d
+        meta = {"asar": asar, "offset": 0, "length": 0, "shaBefore": sha256_file(asar),
+                "appliedAt": now_stamp(),
+                "note": "只同步了 exe 清单（asar 内容未变）"}
+        open(os.path.join(d, "segment.bin"), "wb").close()
         meta["exe"] = {
             "path": exe,
             "shaBefore": exe_sha_before,
@@ -1106,10 +1814,18 @@ def main():
         if old_vals:
             meta.setdefault("headerHashBefore", old_vals[0].lower())
         meta["headerHashAfter"] = hh
-        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        try:
+            final = commit_backup(tmp_owner, meta)
+        except Exception as e:
+            discard_backup(tmp_owner)
+            print("!! 备份提交失败：%s" % e)
+            return 1
         print("exe sync: %d 处清单已更新 -> %s" % (len(exe_edits), hh[:16]))
         print("exe sha256: %s -> %s" % (exe_sha_before[:16], meta["exe"]["shaAfter"][:16]))
+        print("backup:    %s" % final)
+        if missing_aux:
+            print("WARN: %d 条补丁未应用（锚点失配）：%s"
+                  % (len(missing_aux), ", ".join(n for n, _r in missing_aux)))
         maybe_launch(exe, not args.no_launch)
         return 0
 
@@ -1164,6 +1880,16 @@ def main():
     if exe:
         try:
             exe_edits, n_entries = plan_exe_manifest_sync(exe, new_header)
+        except TargetBusy as e:
+            print("!! WorkBuddy.exe 正在被使用（WorkBuddy 在运行），读不到清单：%s" % e)
+            report_running(running_workbuddy(), "asar 写入")
+            print("   本次未写入任何改动（asar 也未改）。请完全退出 WorkBuddy（含托盘）后重跑：")
+            print("   scripts\\deploy.cmd -Asar")
+            return 4
+        except TargetDenied as e:
+            print("!! WorkBuddy.exe 读取被拒绝（需要管理员权限）：%s" % e)
+            print("   本次未写入任何改动（asar 也未改）。请以管理员身份重跑 scripts\\deploy.cmd -Asar。")
+            return 3
         except Exception as e:
             print("!! exe 清单处理失败：%s" % e)
             return 1
@@ -1172,23 +1898,44 @@ def main():
         print("exe:       跳过（--no-exe）—— 应用启动会被整头校验拦住")
 
     if args.dry_run:
-        if file_locked(asar) or (exe and exe_write_blocked(exe)):
+        reason = write_block_reason(asar) or (write_block_reason(exe) if exe else None)
+        if reason == "denied":
+            print("[dry-run] 注意：当前未提权，实跑会以退出码 3 拒绝写入（需要管理员）")
+        elif reason:
             print("[dry-run] 注意：asar / exe 当前被占用（WorkBuddy 可能正在运行），实跑会以退出码 4 拒绝写入")
             report_running(running_workbuddy(), "asar 写入")
         print("[dry-run] 不写文件")
+        if missing_aux:
+            print("[dry-run] WARN: %d 条补丁未应用（锚点失配）：%s"
+                  % (len(missing_aux), ", ".join(n for n, _r in missing_aux)))
         return 0
 
-    # 先报出占用者（进程名 + PID），再判断能不能写：WinError 32 的原因必须可见。
+    # P3：先分清"应用在跑"（WinError 32 → exit 4）与"没提权"（WinError 5 → exit 3）。
+    # 以前一律报"WorkBuddy 正在运行"，非管理员的拒绝访问被误报成进程占用。
     procs = running_workbuddy()
-    if procs:
-        report_running(procs, "asar 写入")
-
-    if file_locked(asar) or (exe and exe_edits and exe_write_blocked(exe)):
+    blocked_asar = file_locked(asar)
+    blocked_exe = bool(exe and exe_edits and exe_write_blocked(exe))
+    if blocked_asar or blocked_exe:
+        denied = (write_denied(asar) if blocked_asar else False) or \
+                 (write_denied(exe) if blocked_exe else False)
+        if denied:
+            print("!! 写入被拒绝（需要管理员权限），不是应用占用：")
+            for p, b in ((asar, blocked_asar), (exe, blocked_exe)):
+                if b:
+                    print("   %s" % p)
+            print("   本次未写入任何改动（asar 也未改）。请以管理员身份重跑：")
+            print("   scripts\\deploy.cmd -Asar")
+            return 3
         print("!! WorkBuddy.exe / app.asar 写不进去（WorkBuddy 正在运行，文件被镜像锁定）。")
+        if procs:
+            report_running(procs, "asar 写入")
+        else:
+            print("   （没看到 WorkBuddy 进程，但文件确实被占用；可能是杀软/EDR 正在扫描）")
         print("   本次未写入任何改动（asar 也未改）。请完全退出 WorkBuddy（含托盘）后重跑：")
         print("   scripts\\deploy.cmd -Asar")
         return 4
 
+    # P4：临时备份目录。正式目录只在写盘 + 全部校验通过后由 commit_backup() 转正。
     d = backup_dir(asar)
     sites = []
     for idx, (rel, entry) in enumerate(affected):
@@ -1205,9 +1952,10 @@ def main():
         "sites": sites,
         "shaBefore": sha_before,
         "patches": done,
+        "patches_skipped": [n for n, _r in missing_aux],
         "headerHashBefore": details[0]["oldHash"] if details else None,
         "headerHashAfter": new_header,
-        "appliedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "appliedAt": now_stamp(),
         "note": "patch-asar.py restore 用；按承载文件整份备份 + 头哈希 + exe 清单",
         "integrity": details,
         "exe": {
@@ -1216,43 +1964,102 @@ def main():
             "edits": [[o, old.decode(), new.decode()] for o, old, new in exe_edits],
         } if exe else None,
     }
-    with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
 
     asar_edits = list(content_edits) + hedits_all
-    try:
-        write_edits(asar, asar_edits)
-        if exe_edits:
-            write_edits(exe, exe_edits)
-    except PermissionError as e:
-        print("写入被拒绝（需要管理员）: %s" % e)
-        return 3
 
     def rollback(reason):
+        # 回滚顺序：先把 exe 改回去，再把 asar 改回去。任何一步失败都要如实说，
+        # 因为"asar 已改、exe 没改"就是客户端 FATAL Integrity check failed 的成因。
+        #
+        # 判定只看**结束状态**：回滚的意义是把 asar（与 exe）恢复成写入前那一个
+        # 字节不差的样子。中间某条逆编辑失败但整体 sha 已经回到 sha_before，
+        # 也是成功的（例如那条本来就没写进去，revert_written 主动跳过）。
         print("!! %s，立即回滚" % reason)
+        exe_rev = exe_fail = 0
+        if exe_edits:
+            exe_rev, exe_fail = revert_written(exe, exe_edits)
+            if exe_fail:
+                print("!! exe 有 %d 处回退失败" % exe_fail)
+        asar_rev, asar_fail = revert_written(asar, asar_edits)
+        if asar_fail:
+            print("!! asar 有 %d 处回退失败" % asar_fail)
         try:
-            if exe_edits:
-                write_edits(exe, [(off, new, old) for off, old, new in exe_edits])
-            write_edits(asar, [(off, new, old) for off, old, new in asar_edits])
-        except Exception as e2:
-            print("!! 回滚写入失败：%s" % e2)
+            back = sha256_file(asar)
+        except OSError as e:
+            print("!! 回滚后读不出 asar：%s" % e)
             return False
-        back = sha256_file(asar)
-        print("   回滚后 asar sha256 %s -> %s" % (back[:16], "OK" if back == sha_before else "MISMATCH"))
-        if exe and exe_sha_before:
-            eb = sha256_file(exe)
-            print("   回滚后 exe  sha256 %s -> %s" % (eb[:16], "OK" if eb == exe_sha_before else "MISMATCH"))
-        return back == sha_before
+        asar_ok = back == sha_before
+        exe_ok = True
+        if exe_edits and exe_sha_before:
+            try:
+                exe_ok = sha256_file(exe) == exe_sha_before
+            except OSError:
+                exe_ok = False
+        if asar_ok and exe_ok:
+            print("   已回滚 asar，避免 integrity 失配")
+            print("   回滚后 asar sha256 %s -> OK（%d 处 %s）"
+                  % (back[:16], asar_rev, "已还原" if asar_rev else "无需改动"))
+            if exe_edits and exe_sha_before:
+                print("   回滚后 exe  sha256 %s -> OK（%d 处 %s）"
+                      % (sha256_file(exe)[:16], exe_rev, "已还原" if exe_rev else "无需改动"))
+            return True
+        if not asar_ok:
+            print("   回滚后 asar sha256 %s -> MISMATCH（期望 %s）" % (back[:16], sha_before[:16]))
+        if not exe_ok:
+            print("   回滚后 exe sha256 MISMATCH（期望 %s）" % exe_sha_before[:16])
+        print("!! 回滚不完整：请用 backups/ 里的正式备份手工还原，或重装 WorkBuddy。")
+        return False
 
+    def fail(reason, code):
+        """统一失败出口：先回滚，再丢掉临时备份，最后按原退出码返回。"""
+        rb = rollback(reason)
+        if not rb:
+            discard_backup(d)  # 回滚不完整时更要清掉临时目录，别让它混进备份链
+            return 1
+        discard_backup(d)
+        return code
+
+    # ---- P1：asar 与 exe 是一个事务 ----
+    # 只写 asar、exe 没跟上 → 客户端启动 FATAL asar_util.cc:143 Integrity check failed。
+    # 所以 exe 的任何失败（权限 / 被锁 / 杀软拦截 / 任意 OSError / 任意异常）都必须回滚 asar。
+    try:
+        write_edits(asar, asar_edits)
+    except PermissionError as e:
+        print("!! asar 写入被拒绝（需要管理员）：%s" % e)
+        # asar 可能已被部分写入：用同样的回滚路径把 sha 恢复回去
+        rb = rollback("asar 写入失败（权限）")
+        discard_backup(d)
+        return 3 if rb else 1
+    except OSError as e:
+        print("!! asar 写入失败：%s" % e)
+        rb = rollback("asar 写入失败")
+        discard_backup(d)
+        return 3 if rb else 1
     if not read_back(asar, asar_edits):
-        rollback("asar 回读不一致")
-        return 1
-    if exe_edits and not read_back(exe, exe_edits):
-        rollback("exe 回读不一致")
-        return 1
+        return fail("asar 回读不一致", 1)
+
+    if exe_edits:
+        try:
+            write_edits(exe, exe_edits)
+        except PermissionError as e:
+            print("!! exe 写入被拒绝：%s" % e)
+            if write_denied(exe):
+                print("   原因：没有管理员权限（WinError 5），不是应用占用。")
+            else:
+                print("   原因：文件被占用或被安全软件拦截（WinError 32/33 等）。")
+            fail("exe 写入失败（权限 / 被锁 / 被杀软拦截）", 3)
+            return 3
+        except Exception as e:
+            # 任何 OSError / EDR 注入的异常：一律回滚 asar。这正是 F-07 的变砖路径。
+            print("!! exe 写入失败：%s: %s" % (type(e).__name__, e))
+            fail("exe 写入失败（权限 / 被锁 / 被杀软拦截）", 3)
+            return 3
+        if not read_back(exe, exe_edits):
+            return fail("exe 回读不一致", 1)
+
+    # 回读已在 P1 事务段里做过；这里只补"文件大小没变"这条形态断言。
     if os.path.getsize(asar) != size:
-        rollback("asar 文件大小变了")
-        return 1
+        return fail("asar 文件大小变了", 1)
 
     integ_ok = True
     for site in sites:
@@ -1263,19 +2070,36 @@ def main():
             break
         print("integrity check: %s" % ("OK (%s)" % msg if ok else "跳过（%s）" % msg))
     if not integ_ok:
-        rollback("integrity 校验不匹配")
-        return 1
+        return fail("integrity 校验不匹配", 1)
+    # P8：按补丁声明的 targets 再校验一遍（写盘后的落盘态）。
+    # 必须**重新解析落盘后的 asar 头**：info["header"] 是写盘前的内存快照，
+    # 用它去查刚改过 integrity 的 entry，会把没参与本次改动的补丁（例如只换了
+    # 另一条补丁的 entry）误判成 MISMATCH，然后触发一次不必要的回滚。
+    with open(asar, "rb") as fh:
+        head = fh.read(16)
+        pickle_size = struct.unpack("<I", head[4:8])[0]
+        fh.seek(0)
+        disk_blob = fh.read(8 + pickle_size)
+        disk_info = parse_header(disk_blob)
+    disk_states = dict(patch_states(open(asar, "rb").read()))
+    for spec in PATCHES:
+        if not spec.get("targets"):
+            continue
+        if disk_states.get(spec["name"]) == "skipped":
+            continue  # 这条补丁本来就没打，不要求它的目标 entry 存在
+        for _pat_t, rel_t, ok_t, msg_t in integrity_report(asar, disk_info["header"], spec["targets"]):
+            if ok_t is False:
+                print("integrity check: FAILED (%s %s)" % (spec["name"], msg_t))
+                return fail("integrity 校验不匹配（%s）" % rel_t, 1)
     if exe:
         try:
             vals = exe_manifest_hashes(exe)
             synced = bool(vals) and all(v.lower() == new_header.lower() for v in vals)
             print("exe manifest:   %s" % ("MATCH（%d 处）" % len(vals) if synced else "MISMATCH"))
             if not synced:
-                rollback("exe 清单未同步")
-                return 1
+                return fail("exe 清单未同步", 1)
         except Exception as e:
-            rollback("exe 清单无法复核（%s）" % e)
-            return 1
+            return fail("exe 清单无法复核（%s）" % e, 1)
 
     ok = True
     if not args.no_node_check:
@@ -1299,19 +2123,29 @@ def main():
                 pass
 
     if not ok:
-        rollback("语法校验失败")
-        return 1
+        return fail("语法校验失败", 1)
 
+    # ---- P4：全部校验通过后才提交备份（写盘前只有 tmp-<stamp> 目录）----
     meta["shaAfter"] = sha256_file(asar)
     if exe:
         meta["exe"]["shaAfter"] = sha256_file(exe)
-    with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    print("backup:    %s" % d)
+    try:
+        final_dir = commit_backup(d, meta)
+    except Exception as e:
+        # 备份提交失败不该把已经打好的 asar 回滚（补丁本身是好的）；
+        # 但必须如实说明"这次没有可 restore 的正式备份"。
+        discard_backup(d)
+        print("!! 备份提交失败：%s" % e)
+        print("   补丁已写入且校验通过，但本次没有留下正式备份（tmp 目录已清理）。")
+        return 1
+    print("backup:    %s" % final_dir)
     print("sha256:    %s -> %s" % (sha_before[:16], meta["shaAfter"][:16]))
     if exe:
         print("exe:       %s -> %s" % (exe_sha_before[:16], meta["exe"]["shaAfter"][:16]))
     print("patches:   %s" % ", ".join("%s=%s" % (n, s) for n, s in patch_states(open(asar, "rb").read())))
+    if missing_aux:
+        print("WARN: %d 条补丁未应用（锚点失配）：%s"
+              % (len(missing_aux), ", ".join(n for n, _r in missing_aux)))
     maybe_launch(exe, not args.no_launch)
     return 0
 

@@ -63,6 +63,38 @@ function Get-VersionDirKey([string]$name) {
     return [version]"0.0.0.0"
 }
 
+# 版本号语义排序：5.11.3 必须排在 5.9.3 前面（字符串序会颠倒）。
+# 解析不出数字前缀的名字退回字符串序，并排在可解析版本之后。
+function Sort-Version {
+    param(
+        [object[]]$Items,
+        [switch]$Descending
+    )
+    $list = @($Items)
+    if ($list.Count -le 1) { return $list }
+    $withVer = @()
+    $plain = @()
+    foreach ($it in $list) {
+        $name = if ($it -is [string]) { [string]$it } else { [string]$it.Name }
+        $m = [regex]::Match($name, '^\d+(\.\d+){0,3}')
+        $v = $null
+        if ($m.Success) { try { $v = [version]$m.Value } catch { } }
+        if ($null -ne $v) {
+            $withVer += [pscustomobject]@{ Item = $it; Name = $name; Version = $v }
+        } else {
+            $plain += [pscustomobject]@{ Item = $it; Name = $name }
+        }
+    }
+    if ($Descending) {
+        $sortedVer = @($withVer | Sort-Object -Property Version, Name -Descending | ForEach-Object { $_.Item })
+        $sortedPlain = @($plain | Sort-Object -Property Name -Descending | ForEach-Object { $_.Item })
+    } else {
+        $sortedVer = @($withVer | Sort-Object -Property Version, Name | ForEach-Object { $_.Item })
+        $sortedPlain = @($plain | Sort-Object -Property Name | ForEach-Object { $_.Item })
+    }
+    return @($sortedVer) + @($sortedPlain)
+}
+
 function Test-IncludeResolution([string]$cacheRoot) {
     $missing = @()
     $checked = 0
@@ -229,89 +261,105 @@ if ($traces.Count -eq 0) {
 
 if ($ListTraces) { exit 0 }
 
-if ($null -eq $info -or -not $info.Found) {
+$inconclusive = $false
+$failed = $false
+$head = ""
+$staleTrace = $false
+$traceFound = -not ($null -eq $info -or -not $info.Found)
+
+if (-not $traceFound) {
+    # 无 trace 不等于缓存/模板都对：不能在这里 exit 2，否则部署侧只看到"marker 未覆盖"，
+    # 后面模板/缓存/补丁一致性检查全被吞掉。继续跑完所有检查，最后以 inconclusive 退出。
     Write-Output ""
     Write-Output "== System prompt =="
     Write-Output "  NOT FOUND. Traces only retain toolInput/toolOutput for model calls."
     Write-Output "  Create a new WorkBuddy chat, send one message, then run this script again."
-    exit 2
+    Write-Output "  (continuing with file/cache checks; exit code 2 = trace-dependent checks are inconclusive)"
+    $inconclusive = $true
+} else {
+    $head = $info.SystemHead
 }
-
-$head = $info.SystemHead
-Write-Output ""
-Write-Output "== Actual system prompt (from trace, prefix) =="
-Write-Output ("  trace:    {0}" -f $info.Path)
-Write-Output ("  started:  {0}" -f $info.StartedAt)
-Write-Output ("  session:  {0}" -f $info.SessionId)
-Write-Output ("  agent:    {0}" -f $info.AgentName)
-Write-Output ("  captured: {0} chars (trace truncates toolInput at about 20k)" -f $head.Length)
-$staleTrace = $false
-$cachePromptForAge = ""
-$ageDir = Join-Path $cache "welcomemode-work"
-if (Test-Path -LiteralPath $ageDir) {
-    $newest = @(Get-ChildItem -LiteralPath $ageDir -Directory -ErrorAction SilentlyContinue |
-        Sort-Object -Property @{ Expression = { Get-VersionDirKey $_.Name } } -Descending | Select-Object -First 1)
-    if ($newest.Count -gt 0) { $cachePromptForAge = Join-Path $newest[0].FullName "prompt.tpl" }
-}
-if ($cachePromptForAge -and (Test-Path -LiteralPath $cachePromptForAge) -and (Test-Path -LiteralPath $info.Path)) {
-    # apply copies files with File.Copy, which keeps the source mtime; the real deploy
-    # time lives in the newest matching backup manifest.
-    $deployTime = $null
-    $backupRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "backups"
-    if (Test-Path -LiteralPath $backupRoot) {
-        foreach ($dir in @(Get-ChildItem -LiteralPath $backupRoot -Directory -ErrorAction SilentlyContinue)) {
-            $manifestFile = Join-Path $dir.FullName "manifest.json"
-            if (-not (Test-Path -LiteralPath $manifestFile)) { continue }
-            try {
-                $m = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
-                if ($m.target -and $m.target -ne $targetProfile.Name) { continue }
-                if (-not $m.target) { continue }
-                $created = [datetime]::Parse($m.createdAt, [Globalization.CultureInfo]::InvariantCulture)
-                if (-not $deployTime -or $created -gt $deployTime) { $deployTime = $created }
-            } catch { }
+if ($traceFound) {
+    Write-Output ""
+    Write-Output "== Actual system prompt (from trace, prefix) =="
+    Write-Output ("  trace:    {0}" -f $info.Path)
+    Write-Output ("  started:  {0}" -f $info.StartedAt)
+    Write-Output ("  session:  {0}" -f $info.SessionId)
+    Write-Output ("  agent:    {0}" -f $info.AgentName)
+    Write-Output ("  captured: {0} chars (trace truncates toolInput at about 20k)" -f $head.Length)
+    $staleTrace = $false
+    $cachePromptForAge = ""
+    $ageDir = Join-Path $cache "welcomemode-work"
+    if (Test-Path -LiteralPath $ageDir) {
+        $newest = @(Get-ChildItem -LiteralPath $ageDir -Directory -ErrorAction SilentlyContinue |
+            Sort-Object -Property @{ Expression = { Get-VersionDirKey $_.Name } } -Descending | Select-Object -First 1)
+        if ($newest.Count -gt 0) { $cachePromptForAge = Join-Path $newest[0].FullName "prompt.tpl" }
+    }
+    if ($cachePromptForAge -and (Test-Path -LiteralPath $cachePromptForAge) -and (Test-Path -LiteralPath $info.Path)) {
+        # apply copies files with File.Copy, which keeps the source mtime; the real deploy
+        # time lives in the newest matching backup manifest.
+        $deployTime = $null
+        $backupRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "backups"
+        if (Test-Path -LiteralPath $backupRoot) {
+            foreach ($dir in @(Get-ChildItem -LiteralPath $backupRoot -Directory -ErrorAction SilentlyContinue)) {
+                $manifestFile = Join-Path $dir.FullName "manifest.json"
+                if (-not (Test-Path -LiteralPath $manifestFile)) { continue }
+                try {
+                    $m = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
+                    if ($m.target -and $m.target -ne $targetProfile.Name) { continue }
+                    if (-not $m.target) { continue }
+                    $created = [datetime]::Parse($m.createdAt, [Globalization.CultureInfo]::InvariantCulture)
+                    if (-not $deployTime -or $created -gt $deployTime) { $deployTime = $created }
+                } catch { }
+            }
+        }
+        if (-not $deployTime) { $deployTime = (Get-Item -LiteralPath $cachePromptForAge).LastWriteTime }
+        $traceTime = (Get-Item -LiteralPath $info.Path).LastWriteTime
+        $staleTrace = ($traceTime -lt $deployTime)
+        Write-Output ("  deployed:  {0} (last apply for this target)" -f $deployTime.ToString("yyyy-MM-dd HH:mm:ss"))
+        if ($staleTrace) {
+            Write-Output "  STALE:     this request predates the deployed prompt; open a new chat in this app and rerun."
         }
     }
-    if (-not $deployTime) { $deployTime = (Get-Item -LiteralPath $cachePromptForAge).LastWriteTime }
-    $traceTime = (Get-Item -LiteralPath $info.Path).LastWriteTime
-    $staleTrace = ($traceTime -lt $deployTime)
-    Write-Output ("  deployed:  {0} (last apply for this target)" -f $deployTime.ToString("yyyy-MM-dd HH:mm:ss"))
-    if ($staleTrace) {
-        Write-Output "  STALE:     this request predates the deployed prompt; open a new chat in this app and rerun."
-    }
-}
-Write-Output ""
-Write-Output "  marker counts in the captured prefix:"
-foreach ($marker in @(
-    'This conversation is powered by',
-    'You are CodeBuddy Code',
-    'search_routing',
-    '<tool_use>',
-    '<personal_files_safety>',
-    'content_policy',
-    'never exposes machinery',
-    '[WBv2]',
-    '[PROBE-A]',
-    '[PROBE-B-WELCOME]',
-    '[WM-WELCOME]',
-    '[WM-TEMPLATE]',
-    '[PC-MEM-OK]',
-    '[IM-CRAFT-OK]'
-)) {
-    Write-Output ("    {0,-34} {1}" -f $marker, (Get-MarkerCount $head $marker))
-}
-
-if ($ShowSystemPrompt) {
-    $pretty = $head -replace '\\r\\n', "`r`n" -replace '\\n', "`n" -replace '\\t', "`t" -replace '\\"', '"'
     Write-Output ""
-    Write-Output ("== System prompt head ({0} chars) ==" -f $HeadChars)
-    if ($pretty.Length -gt $HeadChars) { Write-Output $pretty.Substring(0, $HeadChars) } else { Write-Output $pretty }
+    Write-Output "  marker counts in the captured prefix:"
+    foreach ($marker in @(
+        'This conversation is powered by',
+        'You are CodeBuddy Code',
+        'search_routing',
+        '<tool_use>',
+        '<personal_files_safety>',
+        'content_policy',
+        'never exposes machinery',
+        '[WBv2]',
+        '[PROBE-A]',
+        '[PROBE-B-WELCOME]',
+        '[WM-WELCOME]',
+        '[WM-TEMPLATE]',
+        '[PC-MEM-OK]',
+        '[IM-CRAFT-OK]'
+    )) {
+        Write-Output ("    {0,-34} {1}" -f $marker, (Get-MarkerCount $head $marker))
+    }
+
+    if ($ShowSystemPrompt) {
+        $pretty = $head -replace '\\r\\n', "`r`n" -replace '\\n', "`n" -replace '\\t', "`t" -replace '\\"', '"'
+        Write-Output ""
+        Write-Output ("== System prompt head ({0} chars) ==" -f $HeadChars)
+        if ($pretty.Length -gt $HeadChars) { Write-Output $pretty.Substring(0, $HeadChars) } else { Write-Output $pretty }
+    }
 }
 
 Write-Output ""
 Write-Output "== File consistency (project -> install mirror -> cache [LIVE]) =="
+# 哈希对比：只对项目里有源模板的模式（work/code/design）。claw 由客户端自带，只在下面做存在性检查。
 foreach ($mode in @("work", "code", "design")) {
     $p = Join-Path $project ("welcome-mode\{0}.tpl" -f $mode)
     $inst = if ($res) { Join-Path $res ("plugins\workbuddy-builtin\welcomemode\{0}\prompt.tpl" -f $mode) } else { "" }
+    if (-not (Test-Path -LiteralPath $p)) {
+        Write-Output ("  welcomemode-{0,-7} project source missing: {1}" -f $mode, $p)
+        continue
+    }
     $pHash = Get-Sha256 $p
     $iHash = Get-Sha256 $inst
     $pSize = Get-SizeOf $p
@@ -320,11 +368,34 @@ foreach ($mode in @("work", "code", "design")) {
     Write-Output ("  welcomemode-{0,-7} project={1,6}  install={2,6}  {3}" -f $mode, $pSize, $iSize, $state)
     $cDir = Join-Path $cache ("welcomemode-{0}" -f $mode)
     if (Test-Path -LiteralPath $cDir) {
-        foreach ($v in @(Get-ChildItem -LiteralPath $cDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
+        foreach ($v in @(Sort-Version @(Get-ChildItem -LiteralPath $cDir -Directory -ErrorAction SilentlyContinue) -Descending)) {
             $cHash = Get-Sha256 (Join-Path $v.FullName "prompt.tpl")
             $cState = if ($pHash -and $pHash -eq $cHash) { "MATCH" } else { "MISMATCH" }
             Write-Output ("    cache {0,-52} {1}" -f $v.Name, $cState)
         }
+    }
+}
+# claw 模式由客户端自带（本项目没有源模板）：只检查缓存与安装镜像是否都在，缺失记 WARN 不记 FAIL。
+foreach ($mode in @("claw")) {
+    $cDir = Join-Path $cache ("welcomemode-{0}" -f $mode)
+    $cVers = @()
+    if (Test-Path -LiteralPath $cDir) { $cVers = @(Get-ChildItem -LiteralPath $cDir -Directory -ErrorAction SilentlyContinue) }
+    $cOk = $false
+    if ($cVers.Count -gt 0) {
+        $newest = @(Sort-Version $cVers -Descending)
+        if ($newest.Count -gt 0) {
+            $cPrompt = Join-Path $newest[0].FullName "prompt.tpl"
+            $cOk = Test-Path -LiteralPath $cPrompt
+        }
+    }
+    $instPrompt = if ($res) { Join-Path $res ("plugins\workbuddy-builtin\welcomemode\{0}\prompt.tpl" -f $mode) } else { "" }
+    $iOk = [bool]($instPrompt -and (Test-Path -LiteralPath $instPrompt))
+    $instLabel = if (-not $res) { "n/a" } elseif ($iOk) { "present" } else { "MISSING" }
+    $cacheLabel = if ($cOk) { "present" } else { "MISSING" }
+    if ($cOk -and ($iOk -or -not $res)) {
+        Write-Output ("  welcomemode-{0,-7} cache=present  install={1}  (client-provided, no source template)" -f $mode, $instLabel)
+    } else {
+        Write-Output ("  welcomemode-{0,-7} WARN: cache={1} install={2}  (client-provided mode; not maintained by this project)" -f $mode, $cacheLabel, $instLabel)
     }
 }
 $tp = Join-Path $project "archive\20261114-unused\templates\workbuddy-prompt.tpl"
@@ -350,7 +421,7 @@ if (Test-Path -LiteralPath $skillSrc) {
             Write-Output ("  {0,-34} project={1,6}  cache=MISSING  not a cached skill" -f $name, $srcSize)
             continue
         }
-        foreach ($v in @(Get-ChildItem -LiteralPath $cachePlugin -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
+        foreach ($v in @(Sort-Version @(Get-ChildItem -LiteralPath $cachePlugin -Directory -ErrorAction SilentlyContinue) -Descending)) {
             $cHash = Get-Sha256 (Join-Path $v.FullName "SKILL.md")
             $state = if ($srcHash -and $srcHash -eq $cHash) { "MATCH" } else { "MISMATCH (run apply)" }
             $instState = if (-not $res) { "install n/a" } elseif ($srcHash -and $srcHash -eq $instHash) { "install MATCH" } elseif ($instHash) { "install MISMATCH" } else { "install missing" }
@@ -361,13 +432,16 @@ if (Test-Path -LiteralPath $skillSrc) {
 
 Write-Output ""
 Write-Output "== Source classification =="
+if (-not $traceFound) {
+    Write-Output "  skipped: no captured system prompt (trace-dependent)."
+} else {
 $probeWelcome = Get-MarkerCount $head '[PROBE-B-WELCOME]'
 $probeTemplate = (Get-MarkerCount $head '[WBv2]') + (Get-MarkerCount $head '[PROBE-A]')
 $instWelcome = if ($res) { Join-Path $res "plugins\workbuddy-builtin\welcomemode\work\prompt.tpl" } else { "" }
 $cacheWelcome = ""
 $cDir = Join-Path $cache "welcomemode-work"
 if (Test-Path -LiteralPath $cDir) {
-    $latest = @(Get-ChildItem -LiteralPath $cDir -Directory | Sort-Object Name -Descending | Select-Object -First 1)
+    $latest = @(Sort-Version @(Get-ChildItem -LiteralPath $cDir -Directory) -Descending | Select-Object -First 1)
     if ($latest.Count -gt 0) { $cacheWelcome = Join-Path $latest[0].FullName "prompt.tpl" }
 }
 $instHasProbe = 0
@@ -389,6 +463,7 @@ if ($probeTemplate -gt 0) {
 } else {
     Write-Output "  source not identified from the captured prefix."
 }
+}
 
 Write-Output ""
 Write-Output "== Legacy metric (do NOT use this to judge effectiveness) =="
@@ -406,12 +481,13 @@ if (Test-Path -LiteralPath $logDir) {
     }
 }
 
-$inconclusive = $false
-$failed = $false
 if ($Expect) {
     $n = Get-MarkerCount $head $Expect
     Write-Output ""
-    if ($n -gt 0) {
+    if (-not $traceFound) {
+        Write-Output ("NOT_VERIFIED: {0} (no captured system prompt)" -f $Expect)
+        $inconclusive = $true
+    } elseif ($n -gt 0) {
         Write-Output ("FOUND: {0} ({1} occurrence(s) in the captured prefix)" -f $Expect, $n)
     } else {
         Write-Output ("NOT_FOUND_IN_PREFIX: {0}" -f $Expect)
@@ -422,7 +498,11 @@ if ($Expect) {
 }
 if ($Absent) {
     $n = Get-MarkerCount $head $Absent
-    if ($n -gt 0 -and $staleTrace) {
+    if (-not $traceFound) {
+        Write-Output ""
+        Write-Output ("NOT_VERIFIED: absence of {0} (no captured system prompt)" -f $Absent)
+        $inconclusive = $true
+    } elseif ($n -gt 0 -and $staleTrace) {
         Write-Output ""
         Write-Output ("STALE_TRACE: {0} still appears {1} time(s), but this request predates the deployed prompt." -f $Absent, $n)
         Write-Output "  Not a failure: open a new chat in this app, send one message, rerun this script."
@@ -436,6 +516,10 @@ if ($Absent) {
     }
 }
 
+Write-Output ""
+Write-Output "== Summary =="
+Write-Output ("  trace checks: {0}" -f $(if ($traceFound) { "ran" } else { "inconclusive (no trace)" }))
+Write-Output ("  includes:     {0}" -f $(if ($CheckIncludes) { "checked" } else { "not requested (-CheckIncludes)" }))
 if ($failed -or $includeFailed) { exit 1 }
 if ($inconclusive) { exit 2 }
 

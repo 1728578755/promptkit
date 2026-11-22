@@ -204,8 +204,91 @@ function Get-BuiltinBundleVersion([string]$cacheRoot) {
     foreach ($probe in @('prompt-common', 'welcomemode-work', 'skill-library')) {
         $dir = Join-Path $cacheRoot $probe
         if (-not (Test-DirLong $dir)) { continue }
-        $v = Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+        # 按版本号语义取最新：字符串序会把 5.9.3 排在 5.11.3 前面，新技能就会写进旧版本目录。
+        $v = Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue |
+            Sort-Object -Property @{ Expression = { Get-VersionSortKey $_.Name } } -Descending |
+            Select-Object -First 1
         if ($v) { return $v.Name }
+    }
+    return ""
+}
+
+function Get-VersionFromPluginEntry([object]$entry) {
+    if ($null -eq $entry -or $entry -is [string]) { return "" }
+    if ($entry.version) { return [string]$entry.version }
+    return ""
+}
+
+function Get-NewestVersionString([string[]]$versions) {
+    $best = ""
+    $bestKey = $null
+    foreach ($v in @($versions)) {
+        if ([string]::IsNullOrWhiteSpace($v)) { continue }
+        $m = [regex]::Match($v, '^\d+(\.\d+){0,3}')
+        if (-not $m.Success) { continue }
+        try { $key = [version]$m.Value } catch { continue }
+        if ($null -eq $bestKey -or $key -gt $bestKey) {
+            $best = $v
+            $bestKey = $key
+        }
+    }
+    if (-not $best) {
+        foreach ($v in @($versions)) { if (-not [string]::IsNullOrWhiteSpace($v)) { return $v } }
+    }
+    return $best
+}
+
+# 冷启动时缓存里还没有版本目录，改从安装目录侧读内置插件版本。
+# 先看 installed_plugins.json（resources\plugins\installed_plugins.json 或 resources 同层），
+# 再退回扫描工作目录 workbuddy-builtin 下的 plugin.json（含 .workbuddy-plugin / .codebuddy-plugin）。
+function Get-InstallBuiltinVersion([string]$resourceRoot) {
+    if ([string]::IsNullOrWhiteSpace($resourceRoot)) { return "" }
+    $registryCandidates = @(
+        (Join-Path $resourceRoot 'plugins\installed_plugins.json'),
+        (Join-Path $resourceRoot 'installed_plugins.json')
+    )
+    foreach ($path in $registryCandidates) {
+        if (-not (Test-FileLong $path)) { continue }
+        try { $json = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json } catch { continue }
+        $entries = @()
+        if ($json -and $json.plugins) {
+            if ($json.plugins -is [System.Management.Automation.PSCustomObject]) {
+                foreach ($prop in $json.plugins.PSObject.Properties) {
+                    $value = $prop.Value
+                    $entry = if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) { @($value)[0] } else { $value }
+                    $v = Get-VersionFromPluginEntry $entry
+                    if ($v) { $entries += [pscustomobject]@{ Key = [string]$prop.Name; Version = $v } }
+                }
+            } elseif ($json.plugins -is [System.Collections.IEnumerable]) {
+                foreach ($entry in @($json.plugins)) {
+                    $v = Get-VersionFromPluginEntry $entry
+                    if ($v) {
+                        $name = if ($entry -and $entry.name) { [string]$entry.name } else { "" }
+                        $entries += [pscustomobject]@{ Key = $name; Version = $v }
+                    }
+                }
+            }
+        }
+        if ($json -and $json.'workbuddy-builtin' -and $json.'workbuddy-builtin'.version) {
+            $entries += [pscustomobject]@{ Key = 'workbuddy-builtin'; Version = [string]$json.'workbuddy-builtin'.version }
+        }
+        if ($entries.Count -gt 0) {
+            $preferred = @($entries | Where-Object { $_.Key -match '(?i)workbuddy-builtin' })
+            if ($preferred.Count -eq 0) { $preferred = $entries }
+            return (Get-NewestVersionString @($preferred | ForEach-Object { $_.Version }))
+        }
+    }
+
+    $builtinDir = Join-Path $resourceRoot 'plugins\workbuddy-builtin'
+    if (Test-DirLong $builtinDir) {
+        $versions = @()
+        foreach ($metaFile in @(Get-ChildItem -LiteralPath $builtinDir -Filter 'plugin.json' -File -Recurse -ErrorAction SilentlyContinue)) {
+            try {
+                $meta = Get-Content -LiteralPath $metaFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+                if ($meta.version) { $versions += [string]$meta.version }
+            } catch { }
+        }
+        if ($versions.Count -gt 0) { return (Get-NewestVersionString $versions) }
     }
     return ""
 }
@@ -217,7 +300,18 @@ function Ensure-BuiltinSkillCaches([string]$projectRoot, [string]$cacheRoot, [st
     $skillsDir = Join-Path $projectRoot "plugins\workbuddy-builtin\skills"
     if (-not (Test-Path -LiteralPath $skillsDir)) { return $created }
     $ver = Get-BuiltinBundleVersion $cacheRoot
-    if (-not $ver) { return $created }
+    if (-not $ver) {
+        # 冷启动：缓存里还没有任何版本目录。用安装目录侧的内置插件版本自举，
+        # 否则新增技能既不会建缓存目录，也不会写进 installed_plugins.json。
+        $ver = Get-InstallBuiltinVersion $resourceRoot
+        if ($ver) {
+            Write-Host ("Cold start: using install-side builtin plugin version {0} to bootstrap skill caches." -f $ver)
+        }
+    }
+    if (-not $ver) {
+        Write-Host ("Cold start: plugin cache has no version directory and no install-side builtin plugin version was found under {0}; new skill caches were not created." -f $resourceRoot)
+        return $created
+    }
     foreach ($dir in @(Get-ChildItem -LiteralPath $skillsDir -Directory -ErrorAction SilentlyContinue)) {
         if ($onlySkill -and $dir.Name -ne $onlySkill) { continue }
         $pluginName = "skill-$($dir.Name)"
@@ -394,17 +488,29 @@ function Get-CustomMappings {
                 $inputs += [pscustomobject]@{ Base = $root; File = $file }
             }
         }
+        # 技能/插件目录里不只有提示词：context-dump 这类技能带 scripts\*.py，缺了脚本技能就是死的。
+        # .json 只收插件元数据（plugin.json）；node_modules / 元数据目录 / 缓存目录一律不部署。
+        $deployableExt = @('.md', '.txt', '.tpl', '.py', '.js', '.json')
+        $excludedDirNames = @('node_modules', '.codebuddy-plugin', '.workbuddy-plugin', '__pycache__')
         $pluginsDir = Join-Path $root "plugins\workbuddy-builtin"
         if (Test-Path -LiteralPath $pluginsDir) {
             foreach ($file in @(Get-ChildItem -LiteralPath $pluginsDir -File -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.Extension -in '.md', '.txt', '.tpl' -and $_.Name -ne 'README.md' -and -not $_.Name.StartsWith('_') })) {
+                Where-Object {
+                    $_.Extension -in $deployableExt -and $_.Name -ne 'README.md' -and -not $_.Name.StartsWith('_') -and
+                    ($_.Extension -ne '.json' -or $_.Name -eq 'plugin.json') -and
+                    -not (@($_.FullName.Split('\') | Where-Object { $excludedDirNames -contains $_ }).Count -gt 0)
+                })) {
                 $inputs += [pscustomobject]@{ Base = $root; File = $file }
             }
         }
         $pluginPromptsDir = Join-Path $root "plugin-prompts"
         if (Test-Path -LiteralPath $pluginPromptsDir) {
             foreach ($file in @(Get-ChildItem -LiteralPath $pluginPromptsDir -File -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.Extension -in '.md', '.txt', '.tpl' -and $_.Name -ne 'README.md' -and -not $_.Name.StartsWith('_') })) {
+                Where-Object {
+                    $_.Extension -in $deployableExt -and $_.Name -ne 'README.md' -and -not $_.Name.StartsWith('_') -and
+                    ($_.Extension -ne '.json' -or $_.Name -eq 'plugin.json') -and
+                    -not (@($_.FullName.Split('\') | Where-Object { $excludedDirNames -contains $_ }).Count -gt 0)
+                })) {
                 $inputs += [pscustomobject]@{ Base = $root; File = $file }
             }
         }
@@ -547,6 +653,21 @@ if ($wb) {
     $resourceRoot = Join-Path $cacheRoot "__install__"
 }
 
+# 冷启动判定要在 Ensure-BuiltinSkillCaches 自举之前采样：自举会新建 skill-* 版本目录，
+# 那些目录是本脚本造的，不能证明"客户端启动过、缓存已就绪"。
+# 只看非 skill-* 插件（prompt-common / welcomemode-* / interactionmode-* 等）：客户端启动后
+# 必然生成这些目录；只剩 skill-* 目录 = 上一次冷启动自举的残留，仍按冷启动处理。
+$cacheWasWarm = $false
+if (-not $NoPluginCache -and (Test-DirLong $cacheRoot)) {
+    foreach ($pluginDir in @(Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($pluginDir.Name -like 'skill-*') { continue }
+        if (@(Get-ChildItem -LiteralPath $pluginDir.FullName -Directory -ErrorAction SilentlyContinue).Count -gt 0) {
+            $cacheWasWarm = $true
+            break
+        }
+    }
+}
+
 if ($All) {
     $mappings = Get-CustomMappings
 } elseif ($Template) {
@@ -596,8 +717,10 @@ foreach ($mapping in $mappings) {
 
     $installExists = if ($NoInstall) { $false } else { Test-FileLong $targetFull }
     $installParent = [IO.Path]::GetDirectoryName($targetFull)
-    $canCreate = (Test-Path -LiteralPath $installParent)
-    if (-not $canCreate) {
+    # -NoInstall = 只写缓存；绝不能让"安装目录存在"被算成可写安装目标，
+    # 否则 installCount>0 会绕过后面的冷启动门禁。
+    $canCreate = (-not $NoInstall) -and (Test-Path -LiteralPath $installParent)
+    if (-not $canCreate -and -not $NoInstall) {
         # 允许在已存在的上一级目录下新建一层（例如新增内置技能 skills\<name>\）
         $grandParent = [IO.Path]::GetDirectoryName($installParent)
         if ($grandParent -and (Test-Path -LiteralPath $grandParent)) { $canCreate = $true }
@@ -605,7 +728,7 @@ foreach ($mapping in $mappings) {
     if (-not $installExists -and $cacheTargets.Count -eq 0 -and -not $canCreate -and -not $NoInstall) {
         throw "Target file not found and its directory does not exist: $targetFull"
     }
-    if (-not $installExists -and -not $canCreate) {
+    if (-not $installExists -and -not $canCreate -and -not $NoInstall) {
         $skipped += $mapping.Target
     }
 
@@ -653,11 +776,26 @@ Write-Host ""
 
 # 冷启动缺失：新电脑上客户端还没启动过 -> 缓存里没有任何版本目录 -> 下面会"成功"写 0 个文件。
 # 这不是成功，必须硬失败并明确告诉用户下一步；否则用户会看到 Summary: OK 而实际什么都没变。
+#
+# 两级判定：
+#  (b) 保留原分支：缓存与安装侧都写不进（cacheTotal==0 且 installCount==0）。
+#  (a) 缓存根里没有任何"客户端自有插件"的版本目录 = 客户端从未冷启动过；
+#      不再用 installCount>0 放行（正常部署 installCount>0 时缓存必然由客户端建好）。
+#      为什么不用 cacheTotal：C3 自举会新建 skill-* 版本目录，下一次运行 cacheTotal 就>0，
+#      若按 cacheTotal 判定，冷启动第一次 throw 后第二次就会"看似成功"。skill-* 是本脚本
+#      可以自举的目录，不能证明客户端启动过。
 $coldStart = (-not $NoPluginCache) -and (-not $DryRun) -and ($cacheTotal -eq 0) -and ($installCount -eq 0)
 if ($coldStart) {
     throw ("0 files written: no writable target. Plugin cache has no version directory yet " +
            "($cacheRoot). Start WorkBuddy once, enter any mode, quit completely from the tray, " +
            "then rerun deploy. (refusing to report success when nothing was written)")
+}
+$cacheColdOnEntry = (-not $NoPluginCache) -and (-not $DryRun) -and (-not $cacheWasWarm)
+if ($cacheColdOnEntry) {
+    throw (("0 cache files written: the plugin cache has no version directory yet ({0}). " +
+            "Start WorkBuddy once, enter any mode, quit completely from the tray, then rerun deploy. " +
+            "Writing only the install mirror is not a successful deploy. " +
+            "(refusing to report success when the live prompt cache was not updated)") -f $cacheRoot)
 }
 
 if ($PSBoundParameters.ContainsKey('Verbose')) {

@@ -31,10 +31,16 @@ foreach ($a in @("verify", "pull", "list")) {
 # 2. -DryRun 不启动（干跑不该弹窗）
 Check ($text -match '\$launchActions -contains \$action\)\s*-and\s*-not\s*\$DryRun') "拉起受 -not `$DryRun 约束"
 
-# 3. 拉起必须发生在"失败退出"之前：失败也要能看到应用起来
+# 3. 拉起必须发生在"失败退出"之前。
+#    2026-11-22 起行为有意改变（A7）：有失败时不拉起（应用一起来就重新锁住 app.asar），
+#    所以调用点在一个 `if ($failed -gt 0) { ...不拉起... } else { Start-WorkBuddyIfClosed }`
+#    的 else 分支里。原来的 IndexOf 断言取到的是拉起门禁自身的 `if ($failed -gt 0)`，
+#    改用"调用点必须在最终 exit 1 之前"这一条不变式。
 $idxLaunch = $text.IndexOf("Start-WorkBuddyIfClosed `$profiles")
-$idxFail = $text.IndexOf('if ($failed -gt 0)')
-Check ($idxLaunch -gt 0 -and $idxFail -gt 0 -and $idxLaunch -lt $idxFail) "拉起在 exit 1 之前"
+$idxFailExit = $text.LastIndexOf('Pause-BeforeExit 1')
+Check ($idxLaunch -gt 0 -and $idxFailExit -gt 0 -and $idxLaunch -lt $idxFailExit) "拉起在 exit 1 之前"
+# 3b. 失败时不拉起：else 分支的存在是 A7 的契约
+Check ($text -match '(?s)App not started: the deploy had failures.{0,400}?else\s*\{\s*Start-WorkBuddyIfClosed') "失败时不拉起（else 才拉起）"
 
 # 4. asar 的拉起统一交给脚本末尾：两处调用都必须带 --no-launch，避免双实例
 $noLaunch = ([regex]::Matches($text, '"--no-launch"')).Count
@@ -101,6 +107,24 @@ $script:launched.Clear()
 $missing = [pscustomobject]@{ Name = "missing"; Installed = $false; ExeName = ""; InstallPath = "" }
 $r4 = Start-WorkBuddyIfClosed @($missing, $closed)
 Check ($script:launched.Count -eq 1) ("未安装+未运行：启动 {0} 次（期望 1）" -f $script:launched.Count)
+
+# 场景 5（A7 回归）：两套安装都关着 -> 两套都要启动。
+# 旧实现用 `if (@(Get-Process ...).Count -eq 0) { Start-Process; return }` 或在
+# "已经在跑" 分支 return，一套关着时就会被另一套的存在短路。
+$second = Join-Path $tmp "probe-not-running-2.exe"
+Set-Content -LiteralPath $second -Value "" -Encoding ascii
+$closed2 = [pscustomobject]@{ Name = "closed2"; Installed = $true; ExeName = "probe-not-running-2.exe"; InstallPath = $tmp }
+$script:launched.Clear()
+$r5 = Start-WorkBuddyIfClosed @($closed, $closed2)
+Check ($script:launched.Count -eq 2) ("两套全关：启动 {0} 次（期望 2）" -f $script:launched.Count)
+$launchedArgs = ($script:launched | ForEach-Object { $_.Args }) -join ' '
+Check ($launchedArgs -match 'probe-not-running\.exe' -and $launchedArgs -match 'probe-not-running-2\.exe') "两套都出现在启动参数里"
+Check ($r5 -eq $true) "返回值 true"
+
+# 场景 6（A7 回归）：一套在跑、另一套关着 -> 只启动关着的那一套，且不因"已有一在跑"而提前结束。
+$script:launched.Clear()
+$r6 = Start-WorkBuddyIfClosed @($running, $closed, $closed2)
+Check ($script:launched.Count -eq 2) ("一跑两关：启动 {0} 次（期望 2）" -f $script:launched.Count)
 
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 

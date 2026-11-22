@@ -1,4 +1,7 @@
 @echo off
+rem UTF-8 console so the Chinese status lines are not mangled by the OEM code page.
+rem setlocal scopes the change to this process: the caller's console keeps its codepage.
+chcp 65001 >nul
 setlocal
 set "RC=0"
 if "%~1"=="" goto :oneclick
